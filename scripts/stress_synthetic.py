@@ -22,7 +22,10 @@ def run(records: int) -> dict:
         conn.execute("INSERT INTO organizations VALUES('probe','Synthetic probe','probe',NULL,0)")
         conn.execute("INSERT INTO machines VALUES('probe-machine','probe','Synthetic machine',NULL,NULL,NULL)")
         conn.execute("INSERT INTO device_tokens VALUES(?,?,?,?)", (hash_secret("probe-token"), "probe", "probe-machine", iso(utcnow())))
-        conn.execute("INSERT INTO sessions VALUES(?,?,?)", (hash_secret("probe-session"), "probe", "2099-01-01T00:00:00.000000Z"))
+        conn.execute("INSERT INTO users(id,organization_id,login,role,status,created_at) VALUES(?,?,?,?,?,?)",
+                     ("probe-user", "probe", "probe", "admin", "active", iso(utcnow())))
+        conn.execute("INSERT INTO user_sessions VALUES(?,?,?,?)",
+                     (hash_secret("probe-session"), "probe-user", "probe", "2099-01-01T00:00:00.000000Z"))
         conn.commit()
         client = TestClient(create_app(path))
         client.cookies.set("itles_session", "probe-session")

@@ -79,7 +79,8 @@ def _docx_text(path: Path) -> str:
 def test_docx_and_pdf_preserve_russian_report_content_and_valid_document_structure(output_dir):
     docx_path = output_dir / "itles_report.docx"
     text = _docx_text(docx_path)
-    assert "Достоверные данные прежде обещаний" in text
+    assert "Технический отчёт и программа пилота" in text
+    assert "Сборка отчёта: " in text
     assert "Единый реестр источников" in text
     assert "Реальная машина и 1С заказчика: не подключены." in text
     assert all(source["url"] in text for source in source_records())

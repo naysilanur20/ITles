@@ -194,6 +194,33 @@ async function companyPanel(page: Page) {
   ).toBeVisible();
 }
 
+async function logoutUI(page: Page) {
+  const session = (await page.context().cookies()).find(
+    (cookie) => cookie.name === "itles_session",
+  );
+  if (!session) throw new Error("Logout must start with a session cookie");
+  const [response] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/auth/logout" &&
+        response.request().method() === "POST",
+    ),
+    page.getByRole("button", { name: "Выйти", exact: true }).click(),
+  ]);
+  expect(response.status()).toBe(200);
+  await expect(
+    page.getByRole("button", { name: "Войти в компанию", exact: true }),
+  ).toBeVisible();
+  // Replay the original cookie to verify server revocation, not just cookie removal.
+  expect(
+    (
+      await page.context().request.get("/api/auth/me", {
+        headers: { Cookie: `${session.name}=${session.value}` },
+      })
+    ).status(),
+  ).toBe(401);
+}
+
 async function machineAPI(company: Company, name = "Синтетическая машина") {
   const response = await company.context.request.post("/api/admin/machines", {
     data: { name, model: "Test rig; no OEM" },
@@ -326,7 +353,39 @@ test("UI registration preserves recovery code, logout/login and machine/source s
   await expect(page.getByLabel("Доступный способ передачи")).toHaveValue(
     "unsupported",
   );
-  await page.getByRole("button", { name: "Выйти", exact: true }).click();
+  let releaseLogout!: () => void;
+  const logoutGate = new Promise<void>((resolve) => {
+    releaseLogout = resolve;
+  });
+  const logoutRequested = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname === "/api/auth/logout" &&
+      request.method() === "POST",
+  );
+  await page.route(
+    "**/api/auth/logout",
+    async (route) => {
+      await logoutGate;
+      await route.continue();
+    },
+    { times: 1 },
+  );
+  const loggingOut = logoutUI(page);
+  try {
+    await logoutRequested;
+    await expect(
+      page.getByRole("button", { name: "Выйти", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Войти в компанию", exact: true }),
+    ).toHaveCount(0);
+    expect((await company.context.request.get("/api/auth/me")).status()).toBe(
+      200,
+    );
+  } finally {
+    releaseLogout();
+    await loggingOut;
+  }
   expect((await company.context.request.get("/api/auth/me")).status()).toBe(
     401,
   );
@@ -744,7 +803,7 @@ test("demo clean entry and reentry, fixed dates, map, empty/invalid periods and 
   await expect(
     page.getByText(/За выбранный период событий выработки нет/),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Выйти", exact: true }).click();
+  await logoutUI(page);
   expect((await context.request.get("/api/auth/me")).status()).toBe(401);
   await page
     .getByRole("button", { name: "Посмотреть демо", exact: true })
@@ -772,7 +831,7 @@ test("demo clean entry and reentry, fixed dates, map, empty/invalid periods and 
   await expect(menu).toBeFocused();
   await expect(menu).toHaveAttribute("aria-expanded", "false");
   await menu.click();
-  await page.getByRole("button", { name: "Выйти", exact: true }).click();
+  await logoutUI(page);
 });
 
 test("disabled demo and unavailable API are labelled honestly; mobile keyboard/focus smoke", async ({

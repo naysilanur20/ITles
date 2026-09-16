@@ -1,8 +1,7 @@
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app import create_app
@@ -19,10 +18,6 @@ DOCUMENTS = {
 
 @app.middleware("http")
 async def response_safety(request: Request, call_next):
-    if request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path != "/api/ingest":
-        origin = request.headers.get("origin")
-        if request.headers.get("sec-fetch-site") == "cross-site" or (origin and urlsplit(origin).netloc != request.headers.get("host")):
-            return JSONResponse({"detail": "cross-origin mutation is not allowed"}, status_code=403)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"

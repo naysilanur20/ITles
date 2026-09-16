@@ -1,11 +1,4 @@
-import React, {
-  FormEvent,
-  useCallback,
-  useEffect,
-  useId,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import {
@@ -23,6 +16,7 @@ import {
   AlertTriangle,
   BarChart3,
   BookOpen,
+  Building2,
   CalendarDays,
   ChevronRight,
   CircleHelp,
@@ -38,8 +32,7 @@ import {
   Trees,
   X,
   ArrowUpRight,
-  Eye,
-  EyeOff,
+  ArrowUpDown,
   LayoutDashboard,
   LocateFixed,
   Search,
@@ -49,6 +42,9 @@ import "leaflet/dist/leaflet.css";
 import "./styles.css";
 import naturalEarthRussiaRegionText from "./assets/natural-earth-russia-region.geojson?raw";
 import { ApiError, request } from "./api";
+import { AuthPortal } from "./AuthPortal";
+import { CompanyPanel } from "./CompanyPanel";
+import type { Session } from "./account-types";
 
 type Status = "fresh" | "stale" | "missing" | "invalid";
 type Metric = {
@@ -78,6 +74,10 @@ type Machine = {
   metrics: Metric[];
   position: Position | null;
   last_seen: string | null;
+  received_at?: string | null;
+  last_received_at?: string | null;
+  observed_at?: string | null;
+  last_observed_at?: string | null;
 };
 type Provenance = {
   sources: string[];
@@ -135,24 +135,21 @@ type DocumentItem = {
   format: string;
 };
 type DateRange = { start: string; end: string };
-type Session = {
-  organization: { id: string; name: string };
-  demo: boolean;
-  data_period?: DateRange;
-};
 
 const today = new Date().toISOString().slice(0, 10);
 const naturalEarthRussiaRegion = JSON.parse(
   naturalEarthRussiaRegionText,
 ) as GeoJsonObject;
 const nav = [
-  ["overview", "Обзор парка", LayoutDashboard],
-  ["map", "Карта производства", MapIcon],
-  ["fleet", "Парк и объём", BarChart3],
-  ["quality", "Качество данных", ShieldCheck],
-  ["data", "Передача данных", Database],
-  ["docs", "Исследования", BookOpen],
+  ["overview", "Парк", LayoutDashboard],
+  ["map", "Карта", MapIcon],
+  ["fleet", "Выработка", BarChart3],
+  ["quality", "Приём данных", ShieldCheck],
+  ["data", "Инструкция", Database],
+  ["docs", "Документы", BookOpen],
+  ["company", "Компания", Building2],
 ] as const;
+type ViewId = (typeof nav)[number][0];
 
 function isAbortError(error: unknown) {
   return error instanceof Error && error.name === "AbortError";
@@ -207,20 +204,6 @@ function displayDate(value: string | null) {
         timeZone: "UTC",
       }).format(date) + " UTC";
 }
-function observationAge(value: string | null) {
-  if (!value) return "не поступало";
-  if (new Date(value).getTime() > Date.now())
-    return "время наблюдения опережает часы браузера";
-  const hours = Math.max(
-    0,
-    Math.floor((Date.now() - new Date(value).getTime()) / 3_600_000),
-  );
-  return hours < 1
-    ? "наблюдалось менее часа назад"
-    : hours < 24
-      ? `наблюдалось ${hours} ч назад`
-      : `наблюдалось ${Math.floor(hours / 24)} дн. назад`;
-}
 function basisName(basis: string) {
   return basis === "under_bark"
     ? "без коры"
@@ -231,12 +214,24 @@ function basisName(basis: string) {
 function statusLabel(status: Status) {
   return (
     {
-      fresh: "актуальные",
-      stale: "устарели",
+      fresh: "данные актуальны",
+      stale: "наблюдение устарело",
       missing: "нет данных",
-      invalid: "ошибка данных",
+      invalid: "данные требуют проверки",
     } as Record<Status, string>
   )[status];
+}
+
+function receivedAt(machine: Machine) {
+  return machine.received_at ?? machine.last_received_at ?? null;
+}
+
+function observedAt(machine: Machine) {
+  return machine.observed_at ?? machine.last_observed_at ?? machine.last_seen;
+}
+
+function coordinates(position: Position) {
+  return `${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}`;
 }
 function metricValue(metric: Metric) {
   return metric.value === null
@@ -257,10 +252,15 @@ function recordCount(count: number) {
   return `${count} ${form === "one" ? "запись" : form === "few" ? "записи" : "записей"}`;
 }
 
+function machineCount(count: number) {
+  const form = new Intl.PluralRules("ru").select(count);
+  return `${count} ${form === "one" ? "машина" : form === "few" ? "машины" : "машин"}`;
+}
+
 function StatusPill({ status }: { status: Status }) {
   return (
     <span className={`status status--${status}`}>
-      <i />
+      <i aria-hidden="true" />
       {statusLabel(status)}
     </span>
   );
@@ -372,217 +372,29 @@ function Explanation({
 function Empty({ children }: { children: React.ReactNode }) {
   return (
     <div className="empty">
-      <Database size={22} />
-      <p>{children}</p>
+      <Database size={22} aria-hidden="true" />
+      <div>{children}</div>
     </div>
   );
 }
 
-function Login({
-  onSession,
-  demoAvailable,
-  initialError,
-}: {
-  onSession: (session: Session) => void;
-  demoAvailable: boolean;
-  initialError: string;
-}) {
-  const [account, setAccount] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"organization" | "demo" | null>(null);
-  const [organizationOpen, setOrganizationOpen] = useState(!demoAvailable);
-  const [passwordVisible, setPasswordVisible] = useState(false);
-  async function login(event: FormEvent) {
-    event.preventDefault();
-    setError("");
-    setBusy("organization");
-    try {
-      onSession(
-        await request<Session>("/api/auth/login", {
-          method: "POST",
-          body: JSON.stringify({ account, password }),
-        }),
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось войти");
-    } finally {
-      setBusy(null);
-    }
-  }
-  async function demo() {
-    setError("");
-    setBusy("demo");
-    try {
-      onSession(await request<Session>("/api/auth/demo", { method: "POST" }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Учебный парк недоступен");
-    } finally {
-      setBusy(null);
-    }
-  }
+function WorkspaceDataState({ validDates }: { validDates: boolean }) {
   return (
-    <main className="login-shell" id="main-content">
-      <section className="login-brand">
-        <div className="login-wordmark">
-          <Trees size={24} aria-hidden="true" /> ИТлес{" "}
-          <span>Мониторинг лесозаготовки</span>
-        </div>
-        <div className="login-editorial">
-          <p className="eyebrow">От наблюдения — к решению</p>
-          <h1>
-            Ваш парк.
-            <br />
-            <span>В поле зрения.</span>
-          </h1>
-          <p>
-            Где техника, какие показания поступили и сколько древесины записано
-            в журнале.
-          </p>
-        </div>
-        <div className="login-index" aria-label="Возможности рабочей области">
-          <div>
-            <span>01</span>
-            <b>Машины и координаты</b>
-            <small>Последнее известное положение, не имитация движения</small>
-          </div>
-          <div>
-            <span>02</span>
-            <b>Выработка за период</b>
-            <small>Раздельный учёт с корой и без коры</small>
-          </div>
-          <div>
-            <span>03</span>
-            <b>Происхождение данных</b>
-            <small>Время, источник и методика каждого результата</small>
-          </div>
-        </div>
-        <p className="login-footnote">
-          Версия для проверки · OEM-оборудование и 1С пока не подключены
+    <div className="content-page">
+      <Empty>
+        <p>
+          {validDates
+            ? "Данные парка не получены. Нажмите «Обновить» после восстановления связи."
+            : "Укажите корректный период, чтобы получить журнал и данные машин."}
         </p>
-      </section>
-      <section className="login-card" aria-labelledby="login-title">
-        <p className="eyebrow">Рабочая область</p>
-        <h2 id="login-title">
-          {demoAvailable ? (
-            <>
-              Посмотрите, как
-              <br />
-              устроен парк
-            </>
-          ) : (
-            "Вход в организацию"
-          )}
-        </h2>
-        <p className="login-intro">
-          {demoAvailable
-            ? "Начните с примера. Для учебного парка не нужны ни регистрация, ни пароль."
-            : "Используйте код и пароль, выданные администратором вашей организации."}
-        </p>
-        {(error || initialError) && (
-          <p className="form-error" role="alert">
-            {error || initialError}
-          </p>
-        )}
-        {demoAvailable ? (
-          <div className="demo-entry">
-            <div>
-              <span className="demo-label">Учебный парк</span>
-              <span>Вымышленные данные</span>
-            </div>
-            <p>
-              Откройте машину, проверьте показания и сопоставьте их с журналом
-              выработки.
-            </p>
-            <button
-              className="button button--primary"
-              disabled={busy !== null}
-              onClick={demo}
-            >
-              {busy === "demo" ? "Открываем парк…" : "Открыть учебный парк"}
-              <ArrowUpRight size={18} />
-            </button>
-          </div>
-        ) : (
-          <p className="access-note">
-            Учебный вход недоступен на этом сервере. Для работы нужен доступ
-            организации.
-          </p>
-        )}
-        <button
-          type="button"
-          className="organization-toggle"
-          aria-expanded={organizationOpen}
-          aria-controls="organization-login"
-          onClick={() => setOrganizationOpen(!organizationOpen)}
-        >
-          <span>Уже есть доступ организации?</span>
-          <ChevronRight size={18} />
-        </button>
-        <div id="organization-login" hidden={!organizationOpen}>
-          <p className="access-note">
-            Код и пароль выдаёт администратор после создания организации. Эта
-            форма не регистрирует новый аккаунт.
-          </p>
-          <form onSubmit={login} aria-label="Вход в организацию">
-            <label>
-              Код организации
-              <input
-                autoComplete="username"
-                required
-                minLength={2}
-                value={account}
-                onChange={(e) => setAccount(e.target.value)}
-                placeholder="Код, выданный администратором"
-              />
-            </label>
-            <label className="password-label">
-              Пароль
-              <span className="password-field">
-                <input
-                  autoComplete="current-password"
-                  required
-                  minLength={12}
-                  type={passwordVisible ? "text" : "password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Пароль организации"
-                />
-                <button
-                  type="button"
-                  className="password-toggle"
-                  aria-label={
-                    passwordVisible ? "Скрыть пароль" : "Показать пароль"
-                  }
-                  aria-pressed={passwordVisible}
-                  onClick={() => setPasswordVisible(!passwordVisible)}
-                >
-                  {passwordVisible ? <EyeOff size={18} /> : <Eye size={18} />}
-                </button>
-              </span>
-            </label>
-            <button
-              className="button button--secondary"
-              disabled={busy !== null}
-            >
-              {busy === "organization" ? "Проверяем…" : "Войти в организацию"}
-              <ChevronRight size={18} />
-            </button>
-          </form>
-        </div>
-        <p className="fine-print">
-          В учебном парке можно проверить интерфейс и расчёты. Подключение к
-          реальному харвестеру он не подтверждает.
-        </p>
-      </section>
-    </main>
+      </Empty>
+    </div>
   );
 }
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [checked, setChecked] = useState(false);
-  const [demoAvailable, setDemoAvailable] = useState(false);
   const [initialError, setInitialError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
@@ -599,37 +411,29 @@ export function App() {
         );
       }
     };
-    void Promise.all([
-      request<Session>("/api/auth/me", options)
-        .then((value) => {
-          if (!controller.signal.aborted) setSession(value);
-        })
-        .catch(report),
-      request<{ demo_enabled: boolean }>("/api/auth/options", options)
-        .then((value) => {
-          if (!controller.signal.aborted)
-            setDemoAvailable(value.demo_enabled === true);
-        })
-        .catch(report),
-    ]).finally(() => {
-      if (!controller.signal.aborted) setChecked(true);
-    });
+    void request<Session>("/api/auth/me", options)
+      .then((value) => {
+        if (!controller.signal.aborted) setSession(value);
+      })
+      .catch(report)
+      .finally(() => {
+        if (!controller.signal.aborted) setChecked(true);
+      });
     return () => controller.abort();
   }, []);
   if (!checked)
     return (
-      <div className="splash">
-        <Trees size={26} />
+      <div className="splash" role="status">
+        <Trees size={26} aria-hidden="true" />
         Загрузка ИТлес
       </div>
     );
   return session ? (
     <Workspace session={session} onLogout={() => setSession(null)} />
   ) : (
-    <Login
-      onSession={setSession}
-      demoAvailable={demoAvailable}
-      initialError={initialError}
+    <AuthPortal
+      onSuccess={setSession}
+      initialMessage={initialError || undefined}
     />
   );
 }
@@ -641,7 +445,13 @@ export function Workspace({
   session: Session;
   onLogout: () => void;
 }) {
-  const [view, setView] = useState<(typeof nav)[number][0]>("overview");
+  const needsCompanySetup =
+    !session.demo &&
+    session.user?.role === "admin" &&
+    session.onboarding?.completed === false;
+  const [view, setView] = useState<ViewId>(() =>
+    needsCompanySetup ? "company" : "overview",
+  );
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [dates, setDates] = useState(() => initialDates(session));
@@ -649,6 +459,7 @@ export function Workspace({
   const [fleet, setFleet] = useState<Fleet | null>(null);
   const [detail, setDetail] = useState<MachineDetail | null>(null);
   const [quality, setQuality] = useState<Quality | null>(null);
+  const [qualityLoading, setQualityLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
@@ -662,10 +473,22 @@ export function Workspace({
   const detailAbort = useRef<AbortController | null>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   const sidebar = useRef<HTMLElement>(null);
+  const content = useRef<HTMLElement>(null);
   const isMobileNavigation = useMediaQuery("(max-width: 850px)");
   const validDates = hasValidDateRange(dates);
   const hasPeriod = ["overview", "map", "fleet", "data"].includes(view);
+  const canManageCompany = !session.demo && session.user?.role === "admin";
+  const navigation = nav.filter(([id]) => id !== "company" || !session.demo);
+  const viewLabel =
+    view === "company" && session.user?.role === "user"
+      ? "Мой доступ"
+      : (nav.find(([id]) => id === view)?.[1] ?? "Парк");
   const query = `start=${encodeURIComponent(dates.start)}&end=${encodeURIComponent(dates.end)}`;
+
+  useEffect(() => {
+    content.current?.scrollIntoView({ block: "start" });
+    content.current?.querySelector("h1")?.focus({ preventScroll: true });
+  }, [view]);
   const period = `${dates.start}:${dates.end}`;
 
   useEffect(
@@ -780,6 +603,7 @@ export function Workspace({
     if (view !== "quality") return;
     const controller = new AbortController();
     setQuality(null);
+    setQualityLoading(true);
     request<Quality>("/api/quality", { signal: controller.signal })
       .then((payload) => {
         if (!controller.signal.aborted) setQuality(payload);
@@ -793,6 +617,9 @@ export function Workspace({
         setError(
           err instanceof Error ? err.message : "Не удалось загрузить журнал",
         );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setQualityLoading(false);
       });
     return () => controller.abort();
   }, [view, refreshVersion, onLogout]);
@@ -907,32 +734,41 @@ export function Workspace({
         </div>
         <div className="org-name">{session.organization.name}</div>
         <nav>
-          {nav.map(([id, label, Icon], index) => (
-            <button
-              key={id}
-              type="button"
-              className={view === id ? "nav-item nav-item--active" : "nav-item"}
-              aria-current={view === id ? "page" : undefined}
-              onClick={() => {
-                setView(id);
-                setOpen(false);
-              }}
-            >
-              <Icon size={18} />
-              {label}
-              <span className="nav-number" aria-hidden="true">
-                0{index + 1}
-              </span>
-            </button>
-          ))}
+          {navigation.map(([id, label, Icon]) => {
+            const itemLabel =
+              id === "company" && session.user?.role === "user"
+                ? "Мой доступ"
+                : label;
+            return (
+              <button
+                key={id}
+                type="button"
+                className={
+                  view === id ? "nav-item nav-item--active" : "nav-item"
+                }
+                aria-current={view === id ? "page" : undefined}
+                onClick={() => {
+                  setView(id);
+                  setOpen(false);
+                }}
+              >
+                <Icon size={18} aria-hidden="true" />
+                {itemLabel}
+              </button>
+            );
+          })}
         </nav>
         <div className="sidebar-foot">
-          <div className="privacy">
-            <ShieldCheck size={16} />
-            {session.demo
-              ? "Стенд для проверки. Не вводите реальные данные предприятия."
-              : "Не передавайте персональные данные в технических полях."}
-          </div>
+          {!session.demo && session.user && (
+            <p className="account-summary">
+              {session.user.login}
+              <span>
+                {session.user.role === "admin"
+                  ? "Администратор"
+                  : "Пользователь"}
+              </span>
+            </p>
+          )}
           <button
             className="logout"
             type="button"
@@ -952,7 +788,7 @@ export function Workspace({
           onClick={() => setOpen(false)}
         />
       )}
-      <main className="workspace" id="main-content" tabIndex={-1}>
+      <main className="workspace" id="main-content" tabIndex={-1} ref={content}>
         <header className="topbar">
           <button
             className="icon-button menu-button"
@@ -967,15 +803,9 @@ export function Workspace({
           </button>
           <div>
             <p className="eyebrow">
-              {session.demo
-                ? "Знакомство с системой"
-                : "Рабочая область организации"}
+              {session.demo ? "Учебные данные" : session.organization.name}
             </p>
-            <h1>
-              {view === "map"
-                ? "Производственная карта"
-                : nav.find((x) => x[0] === view)?.[1]}
-            </h1>
+            <h1 tabIndex={-1}>{viewLabel}</h1>
           </div>
           {hasPeriod && (
             <div className="date-controls" aria-label="Период журнала, UTC">
@@ -1008,7 +838,10 @@ export function Workspace({
             type="button"
             onClick={() => void load(true)}
             disabled={
-              refreshing || (hasPeriod && !validDates) || view === "docs"
+              refreshing ||
+              (hasPeriod && !validDates) ||
+              view === "docs" ||
+              view === "company"
             }
           >
             <RefreshCw size={17} className={refreshing ? "spin" : ""} />
@@ -1023,7 +856,7 @@ export function Workspace({
               подключена.
             </p>
             <button type="button" onClick={() => setView("data")}>
-              Что уже работает <ArrowUpRight size={15} />
+              Открыть инструкцию <ArrowUpRight size={15} />
             </button>
           </div>
         )}
@@ -1046,8 +879,19 @@ export function Workspace({
             </button>
           </div>
         )}
-        {loading || refreshing ? (
-          <div className="loading">Получаем журнал и состояние машин…</div>
+        {view === "company" ? (
+          <div className="company-page">
+            <CompanyPanel
+              session={session}
+              onSessionEnded={onLogout}
+              onChanged={() => void load(true)}
+              onOpenMachine={select}
+            />
+          </div>
+        ) : loading || refreshing ? (
+          <div className="loading" role="status">
+            Получаем журнал и состояние машин…
+          </div>
         ) : (
           <View
             view={view}
@@ -1055,11 +899,16 @@ export function Workspace({
             fleet={fleet}
             detail={detail}
             quality={quality}
+            qualityLoading={qualityLoading}
             selected={selected}
             onSelect={select}
             dates={dates}
             validDates={validDates}
             onNavigate={setView}
+            onSessionEnded={onLogout}
+            onOpenCompany={
+              canManageCompany ? () => setView("company") : undefined
+            }
           />
         )}
       </main>
@@ -1069,25 +918,45 @@ export function Workspace({
 
 function View({
   view,
+  onOpenCompany,
   ...props
 }: {
-  view: string;
+  view: ViewId;
   machines: Machine[];
   fleet: Fleet | null;
   detail: MachineDetail | null;
   quality: Quality | null;
+  qualityLoading: boolean;
   selected: string | null;
   onSelect: (id: string) => void;
   dates: { start: string; end: string };
   validDates: boolean;
   onNavigate: (view: (typeof nav)[number][0]) => void;
+  onSessionEnded: () => void;
+  onOpenCompany?: () => void;
 }) {
-  if (view === "overview") return <Overview {...props} />;
+  if (!props.validDates && ["overview", "map", "fleet"].includes(view))
+    return <WorkspaceDataState validDates={false} />;
+  if (!props.fleet && ["overview", "map"].includes(view))
+    return <WorkspaceDataState validDates />;
+  if (view === "overview")
+    return <Overview {...props} onOpenCompany={onOpenCompany} />;
   if (view === "fleet") return <FleetView {...props} />;
-  if (view === "quality") return <QualityView quality={props.quality} />;
+  if (view === "quality")
+    return (
+      <QualityView quality={props.quality} loading={props.qualityLoading} />
+    );
   if (view === "data")
-    return <DataView dates={props.dates} validDates={props.validDates} />;
-  if (view === "docs") return <Documents />;
+    return (
+      <DataView
+        dates={props.dates}
+        validDates={props.validDates}
+        onOpenCompany={onOpenCompany}
+      />
+    );
+  if (view === "docs")
+    return <Documents onSessionEnded={props.onSessionEnded} />;
+  if (view === "company") return null;
   return <MapView {...props} />;
 }
 
@@ -1095,12 +964,16 @@ export function Overview({
   machines,
   fleet,
   onSelect,
+  validDates = true,
   onNavigate,
+  onOpenCompany,
 }: {
   machines: Machine[];
   fleet: Fleet | null;
   onSelect: (id: string) => void;
+  validDates?: boolean;
   onNavigate: (view: (typeof nav)[number][0]) => void;
+  onOpenCompany?: () => void;
 }) {
   const [search, setSearch] = useState("");
   const [ascending, setAscending] = useState(true);
@@ -1116,138 +989,70 @@ export function Overview({
       machine.connection_status !== "fresh" ||
       machine.position?.status !== "fresh",
   );
+  const hasFuel = machines.some((machine) =>
+    machine.metrics.some(
+      (metric) => metric.key === "fuel_level_pct" && metric.value !== null,
+    ),
+  );
+  const hasReceivedTimes = machines.some(
+    (machine) => receivedAt(machine) !== null,
+  );
+
+  function attentionMessage(machine: Machine) {
+    if (!observedAt(machine)) return "События ещё не поступали";
+    if (machine.connection_status === "invalid")
+      return "Последние данные требуют проверки";
+    if (machine.connection_status !== "fresh")
+      return "Последнее событие устарело";
+    if (!machine.position) return "Координаты не поступали";
+    return "Координаты устарели или требуют проверки";
+  }
+
   return (
     <div className="content-page overview-page">
-      <div className="overview-lead">
-        <p>
-          Сначала общая картина.
-          <br />
-          <span>Затем — каждое наблюдение.</span>
-        </p>
-        <div className="fleet-census">
-          <b>{fleet ? machines.length : "—"}</b>
-          <span>
-            машин в парке
-            <br />
-            {fleet
-              ? `${machines.filter((m) => m.position).length} с координатами`
-              : "сводка не получена"}
-          </span>
-        </div>
-      </div>
-      <div className="overview-grid">
-        <section
-          className="production-summary"
-          aria-labelledby="production-summary-title"
-        >
-          <div className="section-heading">
-            <h2 id="production-summary-title">Записано в журнале</h2>
-            <span>За выбранный период</span>
-          </div>
-          {fleet?.totals.length ? (
-            <div className="production-values">
-              {fleet.totals.map((total) => (
-                <div className="production-value" key={total.basis}>
-                  <span>{basisName(total.basis)}</span>
-                  <p>
-                    <b>{volume(total.volume_m3)}</b> <span>м³</span>
-                  </p>
-                  <small>{recordCount(total.records)}</small>
-                  <ProvenanceNotice total={total} />
-                </div>
-              ))}
-            </div>
-          ) : (
-            <Empty>
-              {fleet
-                ? "За этот период нет записей выработки. Это не означает нулевую выработку машины."
-                : "Сводка не получена. Обновите данные после восстановления связи."}
-            </Empty>
-          )}
-          <div className="summary-footer">
-            <p>
-              Базы объёма считаются отдельно.
-              <br />
-              Суммы не подтверждают точность измерения.
-            </p>
-            <button
-              type="button"
-              className="text-button"
-              onClick={() => onNavigate("fleet")}
-            >
-              Разобрать объём <ArrowUpRight size={17} />
-            </button>
-          </div>
-        </section>
-        <section className="attention-panel" aria-labelledby="attention-title">
-          <div className="section-heading">
-            <h2 id="attention-title">Проверить данные</h2>
-            <Clock3 size={18} />
-          </div>
-          <p>Свежесть сообщений, не состояние техники.</p>
-          {attention.length ? (
-            attention.map((machine) => (
-              <button
-                className="attention-row"
-                type="button"
-                onClick={() => onSelect(machine.id)}
-                key={machine.id}
-              >
-                <span>
-                  <b>{machine.name}</b>
-                  <small>
-                    {!machine.last_seen
-                      ? "Сообщения не поступали"
-                      : machine.connection_status === "invalid"
-                        ? "Сообщения требуют проверки"
-                        : machine.connection_status !== "fresh"
-                          ? "Последние сообщения устарели"
-                          : !machine.position
-                            ? "Координаты не поступали"
-                            : "Координаты устарели или требуют проверки"}
-                  </small>
-                </span>
-                <ArrowUpRight size={17} />
-              </button>
-            ))
-          ) : (
-            <p className="attention-empty">
-              {machines.length
-                ? "По всем машинам есть свежие сообщения и координаты. Исправность узлов этим не подтверждена."
-                : "Машины ещё не добавлены в организацию."}
-            </p>
-          )}
-          <button
-            className="text-button"
-            type="button"
-            onClick={() => onNavigate("quality")}
-          >
-            Журнал приёма <ArrowUpRight size={17} />
-          </button>
-        </section>
-      </div>
-      <section className="table-card fleet-register">
-        <div className="section-title">
+      <section
+        className="table-card fleet-register"
+        aria-labelledby="fleet-title"
+      >
+        <div className="section-title fleet-register__head">
           <div>
-            <p className="eyebrow">От общего — к машине</p>
-            <h2>Техника в парке</h2>
+            <p className="eyebrow">Мониторинг техники</p>
+            <h2 id="fleet-title">Машины</h2>
+            <p className="section-description">
+              Время событий и координат не ограничено периодом журнала.
+              Выработка ниже относится к выбранным датам UTC.
+            </p>
           </div>
-          <label className="search-field">
-            <Search size={17} />
-            <input
-              type="search"
-              aria-label="Поиск машин"
-              placeholder="Найти машину"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </label>
+          <div className="fleet-tools">
+            <span className="fleet-count">
+              {fleet ? machineCount(machines.length) : "Загрузка журнала"}
+            </span>
+            <label className="search-field">
+              <Search size={17} aria-hidden="true" />
+              <input
+                type="search"
+                aria-label="Поиск машин"
+                placeholder="Название или модель"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </label>
+          </div>
         </div>
         <p className="table-note">
-          Последние показания — независимо от периода. Выработка — за выбранные
-          даты.
+          {hasReceivedTimes
+            ? "Время приёма пакета и время события показаны отдельно."
+            : "API пока передаёт время последнего события, но не время приёма пакета."}
         </p>
-        {filtered.length ? (
+        {!fleet ? (
+          <Empty>
+            <p>
+              {validDates
+                ? "Список машин и выработка не получены. Нажмите «Обновить» после восстановления связи."
+                : "Укажите корректный период, чтобы получить данные парка."}
+            </p>
+          </Empty>
+        ) : filtered.length ? (
           <div
             className="table-scroll"
             tabIndex={0}
@@ -1256,7 +1061,7 @@ export function Overview({
           >
             <table>
               <caption className="sr-only">
-                Машины, время последних сообщений и объём из журнала
+                Машины, время последних событий, координат и объём из журнала
               </caption>
               <thead>
                 <tr>
@@ -1267,12 +1072,21 @@ export function Overview({
                     <button
                       type="button"
                       onClick={() => setAscending(!ascending)}
+                      aria-label={
+                        ascending
+                          ? "Сортировать машины от Я до А"
+                          : "Сортировать машины от А до Я"
+                      }
                     >
-                      Машина {ascending ? "↑" : "↓"}
+                      Машина <ArrowUpDown size={14} aria-hidden="true" />
                     </button>
                   </th>
-                  <th scope="col">Последнее сообщение</th>
-                  <th scope="col">Топливо</th>
+                  <th scope="col">
+                    {hasReceivedTimes ? "Последний пакет" : "Последнее событие"}
+                  </th>
+                  {hasReceivedTimes && <th scope="col">Время события</th>}
+                  <th scope="col">Координаты</th>
+                  {hasFuel && <th scope="col">Топливо</th>}
                   <th scope="col">Объём за период</th>
                 </tr>
               </thead>
@@ -1284,6 +1098,8 @@ export function Overview({
                   const totals = fleet?.machines.find(
                     (entry) => entry.id === machine.id,
                   )?.totals;
+                  const packetTime = receivedAt(machine);
+                  const eventTime = observedAt(machine);
                   return (
                     <tr key={machine.id}>
                       <th scope="row">
@@ -1302,21 +1118,49 @@ export function Overview({
                         </button>
                       </th>
                       <td>
-                        <span>{displayDate(machine.last_seen)}</span>
-                        <StatusPill status={machine.connection_status} />
-                      </td>
-                      <td>
-                        {fuel?.value != null ? (
-                          <>
-                            <b>
-                              {metricValue(fuel)} {fuel.unit}
-                            </b>
-                            <StatusPill status={fuel.status} />
-                          </>
-                        ) : (
-                          <span className="muted">Нет данных</span>
+                        <span>
+                          {displayDate(
+                            hasReceivedTimes ? packetTime : eventTime,
+                          )}
+                        </span>
+                        {!hasReceivedTimes && eventTime && (
+                          <StatusPill status={machine.connection_status} />
                         )}
                       </td>
+                      {hasReceivedTimes && (
+                        <td>
+                          <span>{displayDate(eventTime)}</span>
+                          {eventTime && (
+                            <StatusPill status={machine.connection_status} />
+                          )}
+                        </td>
+                      )}
+                      <td>
+                        {machine.position ? (
+                          <>
+                            <span>
+                              {displayDate(machine.position.observed_at)}
+                            </span>
+                            <StatusPill status={machine.position.status} />
+                          </>
+                        ) : (
+                          <span className="muted">Координаты не поступали</span>
+                        )}
+                      </td>
+                      {hasFuel && (
+                        <td>
+                          {fuel?.value != null ? (
+                            <>
+                              <b>
+                                {metricValue(fuel)} {fuel.unit}
+                              </b>
+                              <StatusPill status={fuel.status} />
+                            </>
+                          ) : (
+                            <span className="muted">Нет данных</span>
+                          )}
+                        </td>
+                      )}
                       <td>
                         {totals?.length ? (
                           totals.map((total) => (
@@ -1339,24 +1183,142 @@ export function Overview({
           </div>
         ) : (
           <Empty>
-            {search
-              ? "Машины не найдены. Измените запрос или очистите поиск."
-              : "В организации пока нет машин. Порядок подключения — в разделе «Передача данных»."}
+            {search ? (
+              <>
+                <p>Машины не найдены. Измените запрос или очистите поиск.</p>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setSearch("")}
+                >
+                  Очистить поиск
+                </button>
+              </>
+            ) : onOpenCompany ? (
+              <>
+                <p>
+                  В компании пока нет машин. Добавьте машину, затем укажите
+                  доступный источник и дождитесь первого сообщения.
+                </p>
+                <button
+                  type="button"
+                  className="button button--primary"
+                  onClick={onOpenCompany}
+                >
+                  <Building2 size={17} aria-hidden="true" />
+                  Добавить машину
+                </button>
+              </>
+            ) : (
+              <p>
+                В компании пока нет машин. Обратитесь к администратору, чтобы он
+                добавил машину и настроил источник данных.
+              </p>
+            )}
           </Empty>
         )}
-        <div className="table-footer">
-          <span>
-            Показано {filtered.length} из {machines.length}
-          </span>
+        {fleet && (
+          <div className="table-footer">
+            <span>
+              Показано {filtered.length} из {machines.length}
+            </span>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => onNavigate("map")}
+              disabled={!machines.length}
+            >
+              Открыть карту <ArrowUpRight size={17} aria-hidden="true" />
+            </button>
+          </div>
+        )}
+      </section>
+      <div className="overview-support">
+        <section className="attention-panel" aria-labelledby="attention-title">
+          <div className="section-heading">
+            <div>
+              <h2 id="attention-title">Нужно проверить</h2>
+              <p>Свежесть относится к данным, а не к исправности машины.</p>
+            </div>
+            <Clock3 size={18} aria-hidden="true" />
+          </div>
+          {attention.length ? (
+            attention.map((machine) => (
+              <button
+                className="attention-row"
+                type="button"
+                onClick={() => onSelect(machine.id)}
+                key={machine.id}
+              >
+                <span>
+                  <b>{machine.name}</b>
+                  <small>{attentionMessage(machine)}</small>
+                </span>
+                <ArrowUpRight size={17} aria-hidden="true" />
+              </button>
+            ))
+          ) : (
+            <p className="attention-empty">
+              {machines.length
+                ? "Во всех строках есть свежие события и координаты. Исправность машины этим не подтверждается."
+                : "Когда машины появятся, здесь будут показаны устаревшие и неполные данные."}
+            </p>
+          )}
           <button
             className="text-button"
             type="button"
-            onClick={() => onNavigate("map")}
+            onClick={() => onNavigate("quality")}
           >
-            Открыть карту <ArrowUpRight size={17} />
+            Открыть журнал приёма <ArrowUpRight size={17} aria-hidden="true" />
           </button>
-        </div>
-      </section>
+        </section>
+        <section
+          className="production-summary"
+          aria-labelledby="production-summary-title"
+        >
+          <div className="section-heading">
+            <div>
+              <h2 id="production-summary-title">Выработка за период</h2>
+              <p>Суммы собраны из событий журнала.</p>
+            </div>
+          </div>
+          {fleet?.totals.length ? (
+            <div className="production-values">
+              {fleet.totals.map((total) => (
+                <div className="production-value" key={total.basis}>
+                  <span>{basisName(total.basis)}</span>
+                  <p>
+                    <b>{volume(total.volume_m3)}</b> <span>м³</span>
+                  </p>
+                  <small>{recordCount(total.records)}</small>
+                  <ProvenanceNotice total={total} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty>
+              <p>
+                {fleet
+                  ? "За выбранный период нет записей выработки. Это не означает нулевую выработку."
+                  : "Сводка не получена. Обновите данные после восстановления связи."}
+              </p>
+            </Empty>
+          )}
+          <div className="summary-footer">
+            <p>
+              Базы объёма не складываются. Сумма не подтверждает точность
+              измерений.
+            </p>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => onNavigate("fleet")}
+            >
+              Проверить выработку <ArrowUpRight size={17} aria-hidden="true" />
+            </button>
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
@@ -1386,7 +1348,8 @@ function FitMachineBounds({
     if (points.length)
       map.fitBounds(L.latLngBounds(points), {
         padding: [60, 60],
-        maxZoom: 13,
+        // The offline country outlines need a regional starting view.
+        maxZoom: 6,
         animate: false,
       });
   }, [map, coordinates, reset]);
@@ -1422,7 +1385,7 @@ function MapView({
     <div className="map-layout">
       <section
         className="map-stage"
-        aria-label="Карта последних известных позиций"
+        aria-label="Карта последних известных координат"
       >
         <MapContainer
           center={center}
@@ -1447,10 +1410,10 @@ function MapView({
               fillOpacity: 0.72,
             }}
           />
-          <div className="map-label map-label--north">Обзорная карта</div>
+          <div className="map-label map-label--north">Карта</div>
           <div className="map-grid-note">
-            Без дорог и лесных кварталов. Только принятые координаты; внешние
-            тайлы не загружаются.
+            Показаны сохранённые координаты. Дороги и лесные кварталы не
+            загружаются.
           </div>
           {detail?.track && detail.track.length > 1 && (
             <Polyline
@@ -1487,7 +1450,7 @@ function MapView({
                 <br />
                 <small>
                   {statusLabel(machine.position!.status)} ·{" "}
-                  {observationAge(machine.position!.observed_at)}
+                  {displayDate(machine.position!.observed_at)}
                 </small>
               </Tooltip>
             </CircleMarker>
@@ -1509,11 +1472,11 @@ function MapView({
         <div className="map-legend">
           <span>
             <i className="legend-dot" />
-            последняя известная позиция
+            последняя известная координата
           </span>
           <span>
             <Route size={14} />
-            линия — полученные точки периода
+            линия: координаты выбранного периода
           </span>
         </div>
         <div className="map-attribution">
@@ -1523,14 +1486,14 @@ function MapView({
       <aside className="machine-panel">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">ТЕХНИКА</p>
-            <h2>{machines.length} ед.</h2>
+            <p className="eyebrow">Парк</p>
+            <h2>Машины</h2>
           </div>
-          <span>Карта или список</span>
+          <span>{machines.length} шт.</span>
         </div>
         <p className="current-data-note">
-          Текущие показатели и последняя позиция берутся из последних принятых
-          наблюдений и не ограничены выбранным периодом.
+          Последние события, показатели и координаты могут быть вне выбранного
+          периода журнала.
         </p>
         <div className="machine-list">
           {machines.length === 0 ? (
@@ -1578,11 +1541,13 @@ function MachineDetails({ detail }: { detail: MachineDetail }) {
   const other = detail.metrics.filter(
     (metric) => !primaryKeys.includes(metric.key),
   );
+  const packetTime = receivedAt(detail);
+  const eventTime = observedAt(detail);
   return (
     <section className="detail">
       <div className="detail-title">
         <div>
-          <p className="eyebrow">КАРТОЧКА МАШИНЫ</p>
+          <p className="eyebrow">Карточка машины</p>
           <h2>{detail.name}</h2>
         </div>
         <StatusPill status={detail.connection_status} />
@@ -1592,14 +1557,34 @@ function MachineDetails({ detail }: { detail: MachineDetail }) {
           .filter(Boolean)
           .join(" · ") || "Конфигурация не поступала"}
       </p>
+      <div className="machine-times" aria-label="Время данных машины">
+        <div>
+          <span>{packetTime ? "Последний пакет" : "Последнее событие"}</span>
+          <b>{displayDate(packetTime ?? eventTime)}</b>
+          {!packetTime && <StatusPill status={detail.connection_status} />}
+        </div>
+        {packetTime && (
+          <div>
+            <span>Время события</span>
+            <b>{displayDate(eventTime)}</b>
+            <StatusPill status={detail.connection_status} />
+          </div>
+        )}
+      </div>
       <div className="position-reading">
-        <MapIcon size={16} />
-        <span>
-          <b>Последняя известная позиция</b>
-          {detail.position
-            ? `${displayDate(detail.position.observed_at)} · ${observationAge(detail.position.observed_at)}`
-            : "координаты не поступали"}
-        </span>
+        <MapIcon size={16} aria-hidden="true" />
+        <div>
+          <b>Последняя координата</b>
+          {detail.position ? (
+            <>
+              <span>{coordinates(detail.position)}</span>
+              <span>{displayDate(detail.position.observed_at)}</span>
+              <StatusPill status={detail.position.status} />
+            </>
+          ) : (
+            <span>Координаты не поступали</span>
+          )}
+        </div>
       </div>
       <div className="metrics">
         {primary.map((metric) => (
@@ -1619,8 +1604,8 @@ function MachineDetails({ detail }: { detail: MachineDetail }) {
         </details>
       )}
       <p className="norm-note">
-        Статус показывает свежесть наблюдения, не исправность узла. Заводские
-        нормы не подтверждены.
+        Статус показывает свежесть данных, а не исправность машины. Заводские
+        нормы для этой конфигурации не подтверждены.
       </p>
       <div className="volume-box">
         <div>
@@ -1678,7 +1663,34 @@ function MetricReading({ metric }: { metric: Metric }) {
   );
 }
 
-function ProvenanceNotice({ total }: { total: Total }) {
+const sourceLabels: Record<string, string> = {
+  onboard_measurement: "Бортовое измерение",
+  operator_export: "Выгрузка оператора",
+  accounting_import: "Учётный импорт",
+};
+
+const methodLabels: Record<string, string> = {
+  harvester_onboard: "Бортовая система",
+  merchantable_log: "Журнал товарной древесины",
+  manual_ledger: "Ручной журнал",
+};
+
+function provenanceValues(
+  values: string[],
+  labels: Record<string, string> = {},
+) {
+  return values.length
+    ? values.map((value) => labels[value] ?? value).join("; ")
+    : "не указано";
+}
+
+function ProvenanceNotice({
+  total,
+  variant = "details",
+}: {
+  total: Total;
+  variant?: "details" | "inline";
+}) {
   const provenance = total.provenance;
   const sourceIsUnknown =
     !provenance ||
@@ -1710,22 +1722,60 @@ function ProvenanceNotice({ total }: { total: Total }) {
     versionIsUnknown ||
     total.warnings?.some((warning) => /неизвестн/i.test(warning));
   const warnings = [...new Set(total.warnings ?? [])];
-  if (!unknown && !warnings.length) return null;
+  if (!provenance && !unknown && !warnings.length) return null;
+  const source = provenanceValues(provenance?.sources ?? [], sourceLabels);
+  const method = provenanceValues(provenance?.methods ?? [], methodLabels);
+  const version = provenanceValues(provenance?.method_versions ?? []);
+  const calibration = provenanceValues(provenance?.calibration_refs ?? []);
   return (
-    <div className="provenance-warning">
-      {unknown && (
-        <p>
-          <AlertTriangle size={14} />
-          Источник, метод или версия методики указаны не полностью. Требуется
-          сверка.
-        </p>
+    <div className="provenance">
+      {(unknown || warnings.length > 0) && (
+        <div className="provenance-warning">
+          {unknown && (
+            <p>
+              <AlertTriangle size={14} aria-hidden="true" />
+              Источник, метод или версия методики указаны не полностью.
+              Требуется сверка.
+            </p>
+          )}
+          {warnings.map((warning) => (
+            <p key={warning}>
+              <AlertTriangle size={14} aria-hidden="true" />
+              {warning}
+            </p>
+          ))}
+        </div>
       )}
-      {warnings.map((warning) => (
-        <p key={warning}>
-          <AlertTriangle size={14} />
-          {warning}
-        </p>
-      ))}
+      {provenance &&
+        (variant === "inline" ? (
+          <p className="provenance-inline">
+            Источник: {source}. Метод: {method}. Версия: {version}.
+          </p>
+        ) : (
+          <details className="provenance-details">
+            <summary>Источник, метод и версия</summary>
+            <dl>
+              <div>
+                <dt>Источник</dt>
+                <dd>{source}</dd>
+              </div>
+              <div>
+                <dt>Метод</dt>
+                <dd>{method}</dd>
+              </div>
+              <div>
+                <dt>Версия</dt>
+                <dd>{version}</dd>
+              </div>
+              {provenance.calibration_refs.length > 0 && (
+                <div>
+                  <dt>Идентификатор калибровки</dt>
+                  <dd>{calibration}</dd>
+                </div>
+              )}
+            </dl>
+          </details>
+        ))}
     </div>
   );
 }
@@ -1734,22 +1784,29 @@ export function FleetView({
   fleet,
   machines,
   onSelect,
+  validDates = true,
 }: {
   fleet: Fleet | null;
   machines: Machine[];
   onSelect?: (id: string) => void;
+  validDates?: boolean;
 }) {
   return (
     <div className="content-page">
       <section className="intro">
         <p>
-          Суммы построены из журнала событий за выбранный UTC-период. Объём{" "}
-          <b>не объединяется</b> между базами измерения и показан с точностью
-          журнала — до 6 знаков после запятой.
+          Выработка рассчитана по событиям журнала за выбранный период UTC.
+          Объём с корой, без коры и с неизвестной базой показан отдельно.
         </p>
       </section>
       {!fleet ? (
-        <Empty>Сводка недоступна.</Empty>
+        <Empty>
+          <p>
+            {validDates
+              ? "Сводка не получена. Нажмите «Обновить» после восстановления связи."
+              : "Укажите корректный период, чтобы получить сводку выработки."}
+          </p>
+        </Empty>
       ) : (
         <>
           <div className="total-grid">
@@ -1765,23 +1822,29 @@ export function FleetView({
                 </article>
               ))
             ) : (
-              <Empty>За выбранный период событий выработки нет.</Empty>
+              <Empty>
+                <p>
+                  За выбранный период событий выработки нет. Это не доказывает
+                  нулевую выработку.
+                </p>
+              </Empty>
             )}
           </div>
           <section className="table-card">
             <div className="section-title">
               <div>
-                <p className="eyebrow">РАСШИФРОВКА ПАРКА</p>
-                <h2>
-                  {machines.length} машин · {recordCount(fleet.record_count)}
-                </h2>
+                <p className="eyebrow">Журнал выработки</p>
+                <h2>По машинам</h2>
+                <p className="section-description">
+                  {machines.length} машин, {recordCount(fleet.record_count)}.
+                </p>
               </div>
               <a
                 className="text-button"
                 href={`/api/exports/ledger.csv?start=${encodeURIComponent(fleet.period.start)}&end=${encodeURIComponent(fleet.period.end)}`}
               >
                 <Download size={17} />
-                Журнал CSV
+                Скачать журнал CSV
               </a>
             </div>
             <div
@@ -1826,14 +1889,14 @@ export function FleetView({
                                   <b>{volume(x.volume_m3)} м³</b>{" "}
                                   {basisName(x.basis)}
                                 </span>
-                                <ProvenanceNotice total={x} />
+                                <ProvenanceNotice total={x} variant="inline" />
                               </div>
                             ))
-                          : "Нет записей"}
+                          : "Нет записей за период"}
                       </td>
                       <td>
                         {machine.engine_hours === null
-                          ? "недоступны — недостаточно наблюдений или сброс счётчика"
+                          ? "Недоступна: недостаточно наблюдений или счётчик сброшен"
                           : `${machine.engine_hours.toLocaleString("ru-RU")} ч между наблюдениями`}
                       </td>
                     </tr>
@@ -1848,21 +1911,31 @@ export function FleetView({
   );
 }
 
-function QualityView({ quality }: { quality: Quality | null }) {
+function QualityView({
+  quality,
+  loading,
+}: {
+  quality: Quality | null;
+  loading: boolean;
+}) {
   return (
     <div className="content-page">
       <section className="intro">
         <p>
           Счётчики показывают исходы пакетов, а не число событий. «Принято»
-          означает, что пакет прошёл проверку формата и идемпотентности, но не
-          подтверждает исправность датчика.
+          означает, что пакет прошёл проверку формата и повторной доставки. Это
+          не подтверждает исправность датчика.
         </p>
         <p>
           Журнал организации не включает отклонённые до определения организации
           пакеты: например, без авторизации или превышающие допустимый размер.
         </p>
       </section>
-      {!quality ? (
+      {loading ? (
+        <div className="loading" role="status">
+          Получаем журнал приёма…
+        </div>
+      ) : !quality ? (
         <Empty>Журнал качества пока недоступен.</Empty>
       ) : (
         <>
@@ -1885,8 +1958,8 @@ function QualityView({ quality }: { quality: Quality | null }) {
           <section className="table-card">
             <div className="section-title">
               <div>
-                <p className="eyebrow">ПОСЛЕДНИЕ ПАКЕТЫ</p>
-                <h2>Аудит доставки</h2>
+                <p className="eyebrow">Журнал приёма</p>
+                <h2>Последние пакеты</h2>
               </div>
             </div>
             {quality.recent.length ? (
@@ -1929,15 +2002,17 @@ function QualityView({ quality }: { quality: Quality | null }) {
               <Empty>Приём пакетов ещё не зафиксирован.</Empty>
             )}
           </section>
-          <section className="limitations">
-            <h2>Границы интерпретации</h2>
-            {quality.limitations.map((x) => (
-              <p key={x}>
-                <CircleHelp size={16} />
-                {x}
-              </p>
-            ))}
-          </section>
+          {quality.limitations.length > 0 && (
+            <section className="limitations">
+              <h2>Что важно учесть</h2>
+              {quality.limitations.map((x) => (
+                <p key={x}>
+                  <CircleHelp size={16} aria-hidden="true" />
+                  {x}
+                </p>
+              ))}
+            </section>
+          )}
         </>
       )}
     </div>
@@ -1947,9 +2022,11 @@ function QualityView({ quality }: { quality: Quality | null }) {
 export function DataView({
   dates,
   validDates,
+  onOpenCompany,
 }: {
   dates: { start: string; end: string };
   validDates: boolean;
+  onOpenCompany?: () => void;
 }) {
   const href = validDates
     ? `/api/exports/ledger.csv?start=${encodeURIComponent(dates.start)}&end=${encodeURIComponent(dates.end)}`
@@ -1957,15 +2034,29 @@ export function DataView({
   return (
     <div className="content-page narrow">
       <section className="data-lead">
-        <Database size={27} />
+        <Database size={27} aria-hidden="true" />
         <div>
-          <p className="eyebrow">КОНТУР ДАННЫХ</p>
-          <h2>Откуда берутся данные</h2>
+          <p className="eyebrow">Подключение машины</p>
+          <h2>Передача данных</h2>
+          <p>
+            Сначала добавьте конкретную машину и зафиксируйте доступный
+            источник. Сервис принимает нормализованный JSON, но не заменяет
+            OEM-адаптер.
+          </p>
+          {onOpenCompany && (
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={onOpenCompany}
+            >
+              Настроить машину <ArrowUpRight size={17} aria-hidden="true" />
+            </button>
+          )}
         </div>
       </section>
       <div className="readiness-grid">
         <section>
-          <h3>Реализовано на стенде</h3>
+          <h3>Доступно сейчас</h3>
           <p>
             API принимает нормализованные события, SQLite хранит записи,
             интерфейс показывает показатели и раздельные суммы. Локальная
@@ -1974,7 +2065,7 @@ export function DataView({
           </p>
         </section>
         <section>
-          <h3>Ещё не подключено</h3>
+          <h3>Нужно подтвердить отдельно</h3>
           <p>
             Штатный компьютер реального харвестера, OEM/CAN/StanForD-адаптер и
             конфигурация 1С заказчика. Для них нужны доступ, эталонные файлы и
@@ -1985,10 +2076,10 @@ export function DataView({
       <article className="instruction">
         <h3>Что принимает система</h3>
         <p>
-          Только проверяемый нормализованный JSON: события телеметрии,
-          координаты и дельты выработки. Пакеты имеют идентификаторы; повторная
-          доставка не должна удваивать записи. Сначала положите пакет в очередь,
-          затем отправьте накопленные пакеты на HTTPS origin сервера.
+          Только нормализованный JSON: события телеметрии, координаты и дельты
+          выработки. Пакеты имеют идентификаторы, поэтому повторная доставка не
+          должна удваивать записи. Сначала положите пакет в очередь, затем
+          отправьте накопленные пакеты на HTTPS origin сервера.
         </p>
         <pre>
           <code>{`python -m edge.outbox enqueue normalized.json
@@ -1998,7 +2089,7 @@ python -m edge.outbox flush \\
         </pre>
         <p className="fine-print">
           ITLES_DEVICE_TOKEN передаётся только через переменную окружения и не
-          добавляется в команду. URL — HTTPS origin без /api/ingest и других
+          добавляется в команду. URL: HTTPS origin без /api/ingest и других
           путей. Это не доказывает поддержку CAN, StanForD, 1С или конкретной
           бортовой системы.
         </p>
@@ -2063,16 +2154,33 @@ python -m edge.outbox flush \\
   );
 }
 
-function Documents() {
+function Documents({ onSessionEnded }: { onSessionEnded: () => void }) {
   const [documents, setDocuments] = useState<DocumentItem[] | null>(null);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    request<{ documents: DocumentItem[] }>("/api/documents")
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    setDocuments(null);
+    request<{ documents: DocumentItem[] }>("/api/documents", {
+      signal: controller.signal,
+    })
       .then((x) => setDocuments(x.documents))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Документы недоступны"),
-      );
-  }, []);
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        if (err instanceof ApiError && err.status === 401) {
+          onSessionEnded();
+          return;
+        }
+        setError(err instanceof Error ? err.message : "Документы недоступны");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [attempt, onSessionEnded]);
   return (
     <div className="content-page narrow">
       <section className="intro">
@@ -2083,12 +2191,27 @@ function Documents() {
         </p>
       </section>
       {error && (
-        <div className="message message--error" role="alert">
-          {error}
-        </div>
+        <>
+          <div className="message message--error document-error" role="alert">
+            {error}
+          </div>
+          <button
+            className="button button--secondary document-retry"
+            type="button"
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            Повторить загрузку
+          </button>
+        </>
       )}
-      {documents === null ? (
-        <div className="loading">Получаем список документов…</div>
+      {loading ? (
+        <div className="loading" role="status">
+          Получаем список документов…
+        </div>
+      ) : documents === null ? (
+        <Empty>
+          <p>Список документов не получен. Повторите загрузку.</p>
+        </Empty>
       ) : documents.length === 0 ? (
         <Empty>Сервер пока не опубликовал документов.</Empty>
       ) : (

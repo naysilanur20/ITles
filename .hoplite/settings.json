@@ -2,7 +2,7 @@
   "version": 1,
   "scripts": {
     "setup": {"enabled": true, "command": "bash .hoplite/setup.sh"},
-    "run": {"enabled": true, "command": "bash .hoplite/run.sh"}
+    "run": {"enabled": true, "command": "bash .hoplite/run.sh --reload"}
   },
   "ports": {
     "preview": 3000

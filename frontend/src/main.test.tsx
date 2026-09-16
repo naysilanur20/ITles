@@ -81,12 +81,17 @@ describe("production map frontend", () => {
     vi.unstubAllGlobals();
   });
 
-  it("opens the demo first, while keeping organization login available", async () => {
+  it("offers the three entry paths and opens the isolated demo", async () => {
     const fetchMock = vi.mocked(fetch);
+    let authMeCalls = 0;
     fetchMock.mockImplementation((input) => {
       const url = String(input);
-      if (url === "/api/auth/me")
-        return json({ detail: "Не авторизован" }, 401);
+      if (url === "/api/auth/me") {
+        authMeCalls += 1;
+        return authMeCalls === 1
+          ? json({ detail: "Не авторизован" }, 401)
+          : json({ ...session, demo: true });
+      }
       if (url === "/api/auth/options") return json({ demo_enabled: true });
       if (url === "/api/auth/demo") return json({ ...session, demo: true });
       if (url === "/api/machines") return json(machines);
@@ -98,40 +103,42 @@ describe("production map frontend", () => {
     render(<App />);
     const user = userEvent.setup();
     await screen.findByRole("heading", {
-      name: /Посмотрите, как устроен парк/i,
+      name: /Сообщения, координаты.*выработка вашего парка/i,
     });
     expect(
-      screen.getByRole("button", { name: "Открыть учебный парк" }),
+      screen.getByRole("button", { name: "Я администратор компании" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("form", { name: "Вход в организацию", hidden: true }),
-    ).not.toBeVisible();
-
-    await user.click(
-      screen.getByRole("button", { name: "Уже есть доступ организации?" }),
+      screen.getByRole("button", { name: "Войти в компанию" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Посмотреть демо" }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Посмотреть демо" }),
+      ).toBeEnabled(),
     );
-    expect(
-      screen.getByRole("form", { name: "Вход в организацию" }),
-    ).toBeVisible();
-    await user.click(
-      screen.getByRole("button", { name: "Открыть учебный парк" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Посмотреть демо" }));
 
-    expect(
-      await screen.findByRole("heading", { name: "Обзор парка" }),
-    ).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Парк" })).toBeVisible();
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/auth/demo",
       expect.objectContaining({ method: "POST" }),
     );
   });
 
-  it("uses organization login directly when the server disables the demo", async () => {
+  it("keeps individual company login available when the demo is disabled", async () => {
     const fetchMock = vi.mocked(fetch);
+    let authMeCalls = 0;
     fetchMock.mockImplementation((input) => {
       const url = String(input);
-      if (url === "/api/auth/me")
-        return json({ detail: "Не авторизован" }, 401);
+      if (url === "/api/auth/me") {
+        authMeCalls += 1;
+        return authMeCalls === 1
+          ? json({ detail: "Не авторизован" }, 401)
+          : json(session);
+      }
       if (url === "/api/auth/options") return json({ demo_enabled: false });
       if (url === "/api/auth/login") return json(session);
       if (url === "/api/machines") return json(machines);
@@ -143,24 +150,28 @@ describe("production map frontend", () => {
     render(<App />);
     const user = userEvent.setup();
     expect(
-      await screen.findByRole("heading", { name: "Вход в организацию" }),
+      await screen.findByRole("heading", {
+        name: /Сообщения, координаты.*выработка вашего парка/i,
+      }),
     ).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "Открыть учебный парк" }),
-    ).not.toBeInTheDocument();
+      await screen.findByText("Учебный парк отключён на этом сервере."),
+    ).toBeVisible();
     expect(
-      screen.getByRole("form", { name: "Вход в организацию" }),
+      screen.getByRole("button", { name: "Посмотреть демо" }),
+    ).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Войти в компанию" }));
+    expect(
+      await screen.findByRole("heading", { name: "Войти в компанию" }),
     ).toBeVisible();
 
-    await user.type(screen.getByLabelText("Код организации"), "forest-1");
+    await user.type(screen.getByLabelText("Код компании"), "forest-1");
+    await user.type(screen.getByLabelText("Служебный логин"), "operator-1");
     await user.type(screen.getByLabelText("Пароль"), "correct-horse-battery");
-    await user.click(
-      screen.getByRole("button", { name: "Войти в организацию" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Войти" }));
 
-    expect(
-      await screen.findByRole("heading", { name: "Обзор парка" }),
-    ).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Парк" })).toBeVisible();
   });
 
   it("restores an existing organization session regardless of demo availability", async () => {
@@ -177,13 +188,11 @@ describe("production map frontend", () => {
 
     render(<App />);
 
+    expect(await screen.findByRole("heading", { name: "Парк" })).toBeVisible();
     expect(
-      await screen.findByRole("heading", { name: "Обзор парка" }),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("heading", { name: /Посмотрите, как устроен парк/i }),
+      screen.queryByRole("heading", { name: /Мониторинг харвестеров/i }),
     ).not.toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).not.toHaveBeenCalledWith(
       "/api/auth/options",
       expect.anything(),
     );
@@ -201,11 +210,10 @@ describe("production map frontend", () => {
     render(<App />);
     const user = userEvent.setup();
     await screen.findByRole("heading", {
-      name: /Посмотрите, как устроен парк/i,
+      name: /Сообщения, координаты.*выработка вашего парка/i,
     });
-    await user.click(
-      screen.getByRole("button", { name: "Уже есть доступ организации?" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Войти в компанию" }));
+    await screen.findByRole("heading", { name: "Войти в компанию" });
 
     const password = screen.getByLabelText("Пароль");
     const reveal = screen.getByRole("button", { name: "Показать пароль" });
@@ -235,7 +243,7 @@ describe("production map frontend", () => {
     });
 
     render(<Workspace session={demoSession} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
 
     expect(screen.getByLabelText("Дата начала периода")).toHaveValue(
       "2024-02-01",
@@ -269,14 +277,112 @@ describe("production map frontend", () => {
       return json({});
     });
     render(<Workspace session={session} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
     await screen.findByRole("heading", { name: "Харвестер 01" });
-    await userEvent.click(
-      screen.getByRole("button", { name: "Качество данных" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Приём данных" }));
+    expect(
+      screen.getByRole("heading", { name: "Приём данных", level: 1 }),
+    ).toHaveFocus();
     await waitFor(() => expect(qualityCalls).toBe(1));
     await userEvent.click(screen.getByRole("button", { name: /Обновить/ }));
     await waitFor(() => expect(qualityCalls).toBe(2));
+  });
+
+  it("shows a loading state while the receipt journal is requested", async () => {
+    let resolveQuality: ((response: Response) => void) | undefined;
+    const qualityResponse = new Promise<Response>((resolve) => {
+      resolveQuality = resolve;
+    });
+    vi.mocked(fetch).mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/machines") return json(machines);
+      if (url.startsWith("/api/fleet?")) return json(fleet);
+      if (url.startsWith("/api/machines/")) return json(detail);
+      if (url === "/api/quality") return qualityResponse;
+      return json({});
+    });
+
+    render(<Workspace session={session} onLogout={vi.fn()} />);
+    await screen.findByRole("region", { name: "Таблица машин" });
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Приём данных" }));
+
+    expect(await screen.findByText("Получаем журнал приёма…")).toBeVisible();
+    resolveQuality?.(
+      new Response(
+        JSON.stringify({
+          counts: { accepted: 0, duplicates: 0, rejected: 0 },
+          recent: [],
+          limitations: [],
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    expect(
+      await screen.findByText("Приём пакетов ещё не зафиксирован."),
+    ).toBeVisible();
+  });
+
+  it("stops document loading after a failed request and offers a retry", async () => {
+    let documentRequests = 0;
+    vi.mocked(fetch).mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/machines") return json(machines);
+      if (url.startsWith("/api/fleet?")) return json(fleet);
+      if (url.startsWith("/api/machines/")) return json(detail);
+      if (url === "/api/documents") {
+        documentRequests += 1;
+        return documentRequests === 1
+          ? json({ detail: "Документы временно недоступны" }, 503)
+          : json({ documents: [] });
+      }
+      return json({});
+    });
+
+    render(<Workspace session={session} onLogout={vi.fn()} />);
+    await screen.findByRole("region", { name: "Таблица машин" });
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Документы" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Сервер временно недоступен",
+    );
+    expect(
+      screen.queryByText("Получаем список документов…"),
+    ).not.toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Повторить загрузку" }));
+    expect(
+      await screen.findByText("Сервер пока не опубликовал документов."),
+    ).toBeVisible();
+  });
+
+  it("returns to login when the documents API rejects the session", async () => {
+    const onLogout = vi.fn();
+    vi.mocked(fetch).mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/machines") return json(machines);
+      if (url.startsWith("/api/fleet?")) return json(fleet);
+      if (url.startsWith("/api/machines/")) return json(detail);
+      if (url === "/api/documents")
+        return json({ detail: "Не авторизован" }, 401);
+      return json({});
+    });
+
+    render(<Workspace session={session} onLogout={onLogout} />);
+    await screen.findByRole("region", { name: "Таблица машин" });
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Документы" }));
+
+    await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(1));
+    expect(
+      screen.queryByRole("button", { name: "Повторить загрузку" }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not pretend a session ended when logout failed", async () => {
@@ -291,13 +397,41 @@ describe("production map frontend", () => {
       return json({});
     });
     render(<Workspace session={session} onLogout={onLogout} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
     await screen.findByRole("heading", { name: "Харвестер 01" });
     await userEvent.click(screen.getByRole("button", { name: "Выйти" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Сервер не подтвердил выход",
     );
     expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake a failed park request for an empty company", async () => {
+    const adminSession = {
+      ...session,
+      user: { id: "admin-1", login: "admin", role: "admin" as const },
+    };
+    vi.mocked(fetch).mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/machines")
+        return json({ detail: "Сервис временно недоступен" }, 503);
+      if (url.startsWith("/api/fleet?")) return json(fleet);
+      return json({});
+    });
+
+    render(<Workspace session={adminSession} onLogout={vi.fn()} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Сервер временно недоступен",
+    );
+    expect(
+      screen.getByText(
+        "Данные парка не получены. Нажмите «Обновить» после восстановления связи.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(/В компании пока нет машин/i),
+    ).not.toBeInTheDocument();
   });
 
   it("returns to login when an expired session rejects a workspace request", async () => {
@@ -347,7 +481,7 @@ describe("production map frontend", () => {
     render(<Workspace session={session} onLogout={onLogout} />);
     await userEvent
       .setup()
-      .click(screen.getByRole("button", { name: "Качество данных" }));
+      .click(screen.getByRole("button", { name: "Приём данных" }));
 
     await waitFor(() => expect(onLogout).toHaveBeenCalledTimes(1));
   });
@@ -373,7 +507,7 @@ describe("production map frontend", () => {
     });
 
     render(<Workspace session={session} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
     await waitFor(() => expect(detailCalls).toBe(1));
 
     fireEvent.change(screen.getByLabelText("Дата начала периода"), {
@@ -417,7 +551,7 @@ describe("production map frontend", () => {
     });
 
     render(<Workspace session={session} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
     await waitFor(() => expect(detailCalls).toBe(1));
     await userEvent
       .setup()
@@ -457,7 +591,7 @@ describe("production map frontend", () => {
     });
 
     render(<Workspace session={session} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
     await waitFor(() => expect(detailCalls).toBe(1));
     await userEvent
       .setup()
@@ -483,7 +617,7 @@ describe("production map frontend", () => {
     });
 
     render(<Workspace session={session} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
     await screen.findByText("Харвестер 01");
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     const callsBeforeEmptyDate = fetchMock.mock.calls.length;
@@ -496,6 +630,11 @@ describe("production map frontend", () => {
         "Укажите обе даты периода",
       ),
     );
+    expect(
+      screen.getByText(
+        "Укажите корректный период, чтобы получить журнал и данные машин.",
+      ),
+    ).toBeVisible();
     expect(fetchMock.mock.calls).toHaveLength(callsBeforeEmptyDate);
   });
 
@@ -526,6 +665,40 @@ describe("production map frontend", () => {
       screen.getByText(/Источник, метод или версия методики/i),
     ).toBeVisible();
     expect(screen.getByText("Изменение счётчика")).toBeVisible();
+  });
+
+  it("keeps known provenance available beside a production total", async () => {
+    render(
+      <FleetView
+        fleet={{
+          period: { start: "2026-01-01", end: "2026-01-14" },
+          totals: [
+            {
+              basis: "under_bark",
+              volume_m3: "0.000000",
+              records: 1,
+              provenance: {
+                sources: ["onboard_measurement"],
+                methods: ["harvester_onboard"],
+                method_versions: ["synthetic-v2-a"],
+                calibration_refs: ["check-2026-01"],
+              },
+            },
+          ],
+          machines: [],
+          record_count: 1,
+        }}
+        machines={[]}
+      />,
+    );
+
+    await userEvent.setup().click(screen.getByText("Источник, метод и версия"));
+
+    expect(screen.getByText("Бортовое измерение")).toBeVisible();
+    expect(screen.getByText("Бортовая система")).toBeVisible();
+    expect(screen.getByText("synthetic-v2-a")).toBeVisible();
+    expect(screen.getByText("check-2026-01")).toBeVisible();
+    expect(screen.getByText("0", { exact: true })).toBeVisible();
   });
 
   it("warns when known methods or method versions are mixed in one total", () => {
@@ -713,13 +886,68 @@ describe("production map frontend", () => {
       expect.stringContaining("Альфа"),
       expect.stringContaining("Бета"),
     ]);
-    await user.click(screen.getByRole("button", { name: /Машина ↑/ }));
+    await user.click(
+      screen.getByRole("button", { name: "Сортировать машины от Я до А" }),
+    );
     expect(table.querySelectorAll("tbody tr")[0]).toHaveTextContent("Бета");
 
     await user.type(screen.getByLabelText("Поиск машин"), "альфа");
     expect(screen.getByRole("row", { name: /Альфа/ })).toBeVisible();
     expect(screen.queryByRole("row", { name: /Бета/ })).not.toBeInTheDocument();
     expect(screen.getByText("Показано 1 из 2")).toBeVisible();
+  });
+
+  it("keeps packet receipt, event, and coordinate times in separate columns when the API provides them", () => {
+    render(
+      <Overview
+        fleet={{ ...fleet, machines: [] }}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        machines={[
+          {
+            ...machines.machines[0],
+            connection_status: "fresh" as const,
+            last_seen: "2026-01-14T08:30:00Z",
+            observed_at: "2026-01-14T08:30:00Z",
+            received_at: "2026-01-14T09:00:00Z",
+            position: {
+              latitude: 61.1,
+              longitude: 73.4,
+              observed_at: "2026-01-14T08:15:00Z",
+              status: "fresh" as const,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Последний пакет")).toBeVisible();
+    expect(screen.getByText("Время события")).toBeVisible();
+    expect(screen.getByText("Координаты")).toBeVisible();
+    expect(screen.getByRole("row", { name: /Харвестер 01/ })).toHaveTextContent(
+      "UTC",
+    );
+  });
+
+  it("sends an administrator from an empty fleet to company setup", async () => {
+    const onOpenCompany = vi.fn();
+    render(
+      <Overview
+        fleet={fleet}
+        machines={[]}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+        onOpenCompany={onOpenCompany}
+      />,
+    );
+
+    expect(
+      screen.getByText(/В компании пока нет машин. Добавьте машину/i),
+    ).toBeVisible();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Добавить машину" }));
+    expect(onOpenCompany).toHaveBeenCalledTimes(1);
   });
 
   it("shows the real outbox commands and a schema-valid production example", () => {
@@ -770,7 +998,7 @@ describe("production map frontend", () => {
     });
 
     render(<Workspace session={session} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Карта производства" }));
+    fireEvent.click(screen.getByRole("button", { name: "Карта" }));
     const trigger = await screen.findByRole("button", {
       name: "Уровень топлива: открыть пояснение",
     });

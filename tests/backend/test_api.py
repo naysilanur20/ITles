@@ -419,13 +419,13 @@ def test_auth_options_matches_demo_admission_setting(api, monkeypatch, setting, 
         monkeypatch.setenv("ITLES_DEMO_ENABLED", setting)
     response = api.get("/api/auth/options")
     assert response.status_code == 200
-    assert response.json() == {"demo_enabled": enabled}
+    assert response.json() == {"demo_enabled": enabled, "registration_enabled": True}
     assert "set-cookie" not in response.headers
     assert api.post("/api/auth/demo").status_code == (200 if enabled else 404)
 
 
 def test_auth_options_discloses_no_tenant_or_session_information(api):
-    expected = {"demo_enabled": False}
+    expected = {"demo_enabled": False, "registration_enabled": True}
     assert api.get("/api/auth/options").json() == expected
     for account in ("forest-a", "forest-b"):
         login(api, account)
@@ -442,7 +442,7 @@ def test_auth_options_does_not_initialize_a_database(tmp_path, monkeypatch):
     monkeypatch.delenv("ITLES_DEMO_ENABLED", raising=False)
     path = tmp_path / "not-created.db"
     client = TestClient(create_app(str(path)))
-    assert client.get("/api/auth/options").json() == {"demo_enabled": False}
+    assert client.get("/api/auth/options").json() == {"demo_enabled": False, "registration_enabled": True}
     assert not path.exists()
 
 

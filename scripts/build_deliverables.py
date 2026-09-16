@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import textwrap
@@ -167,8 +168,9 @@ def plain_inline(token):
 
 
 def report_markdown(evidence):
-    chunks = ["# ИТлес\n\n## Достоверные данные прежде обещаний\n\nТехнический отчёт и программа пилота. Версия от " + DATE + ".\n\nИсследование: открытая документация. Программные примеры: синтетические. Реальная машина и 1С заказчика: не подключены.\n"]
-    for path in ("docs/architecture.md", "research/hardware.md", "research/volume-1c.md", "docs/privacy.md", "docs/demo-scenario.md", "docs/verification.md", "README.md"):
+    generated_on = datetime.now(timezone.utc).date().isoformat()
+    chunks = ["# ИТлес\n\n## Технический отчёт и программа пилота\n\nСборка отчёта: " + generated_on + ". Проверка документальных источников: " + DATE + ".\n\nИсследование: открытая документация. Программные примеры: синтетические. Реальная машина и 1С заказчика: не подключены.\n"]
+    for path in ("docs/architecture.md", "docs/administrator.md", "docs/user-guide.md", "docs/deployment.md", "docs/api-contract-v2.md", "research/hardware.md", "research/volume-1c.md", "docs/privacy.md", "docs/demo-scenario.md", "docs/verification.md", "README.md"):
         file = ROOT / path
         if file.exists():
             chunks.append(file.read_text())

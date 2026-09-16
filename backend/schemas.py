@@ -5,7 +5,7 @@ import re
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -31,6 +31,137 @@ METRICS: dict[str, tuple[str, str, float | None, float | None]] = {
 SOURCES = {"onboard_measurement", "operator_export", "accounting_import"}
 METHODS = {"harvester_onboard", "merchantable_log", "manual_ledger"}
 TECHNICAL_SLUG = r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+
+
+def _optional_label(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+class TechnicalIdentifierModel(StrictModel):
+    @field_validator("account", "login", check_fields=False)
+    @classmethod
+    def lower_technical_identifier(cls, value: str | None) -> str | None:
+        if value is not None and value != value.lower():
+            raise ValueError("identifier must use lowercase letters")
+        return value
+
+
+class RegisterRequest(TechnicalIdentifierModel):
+    organization_name: StrictStr = Field(min_length=1, max_length=100)
+    account: StrictStr = Field(min_length=2, max_length=80, pattern=TECHNICAL_SLUG)
+    login: StrictStr = Field(min_length=2, max_length=80, pattern=TECHNICAL_SLUG)
+    password: StrictStr = Field(min_length=12, max_length=128)
+
+    @field_validator("organization_name")
+    @classmethod
+    def organization_name_is_printable(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or any(ord(character) < 32 for character in cleaned):
+            raise ValueError("organization_name must contain printable characters")
+        return cleaned
+
+
+class LoginRequest(StrictModel):
+    # Pre-v2 callers may use only the transitional read-only principal.
+    account: StrictStr = Field(min_length=2, max_length=80, pattern=r"^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
+    login: StrictStr | None = Field(default=None, min_length=2, max_length=80, pattern=TECHNICAL_SLUG)
+    password: StrictStr = Field(min_length=12, max_length=128)
+
+    @field_validator("login")
+    @classmethod
+    def lower_login(cls, value: str | None) -> str | None:
+        if value is not None and value != value.lower():
+            raise ValueError("identifier must use lowercase letters")
+        return value
+
+
+class ActivationRequest(StrictModel):
+    account: StrictStr = Field(min_length=2, max_length=80, pattern=r"^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
+    login: StrictStr = Field(min_length=2, max_length=80, pattern=TECHNICAL_SLUG)
+    code: StrictStr = Field(min_length=16, max_length=256)
+    password: StrictStr = Field(min_length=12, max_length=128)
+
+
+class RecoveryRequest(StrictModel):
+    account: StrictStr = Field(min_length=2, max_length=80, pattern=r"^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
+    login: StrictStr = Field(min_length=2, max_length=80, pattern=TECHNICAL_SLUG)
+    recovery_code: StrictStr = Field(min_length=16, max_length=256)
+    password: StrictStr = Field(min_length=12, max_length=128)
+
+
+class PasswordChangeRequest(StrictModel):
+    current_password: StrictStr = Field(min_length=1, max_length=128)
+    new_password: StrictStr = Field(min_length=12, max_length=128)
+
+
+class RecoveryCodeRequest(StrictModel):
+    password: StrictStr = Field(min_length=1, max_length=128)
+
+
+class OnboardingPatch(StrictModel):
+    step: Literal["machine", "users", "source", "complete"] | None = None
+    users_configured: StrictBool | None = None
+
+
+class CompanyPatch(StrictModel):
+    name: StrictStr = Field(min_length=1, max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def company_name_is_printable(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or any(ord(character) < 32 for character in cleaned):
+            raise ValueError("name must contain printable characters")
+        return cleaned
+
+
+class UserCreateRequest(TechnicalIdentifierModel):
+    login: StrictStr = Field(min_length=2, max_length=80, pattern=TECHNICAL_SLUG)
+
+
+class MachineCreateRequest(StrictModel):
+    name: StrictStr = Field(min_length=1, max_length=100)
+    model: StrictStr | None = Field(default=None, max_length=120)
+    head: StrictStr | None = Field(default=None, max_length=120)
+    computer: StrictStr | None = Field(default=None, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def machine_name_is_printable(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or any(ord(character) < 32 for character in cleaned):
+            raise ValueError("name must contain printable characters")
+        return cleaned
+
+    @field_validator("model", "head", "computer")
+    @classmethod
+    def normalize_optional_labels(cls, value: str | None) -> str | None:
+        return _optional_label(value)
+
+
+class SourcePatch(StrictModel):
+    model: StrictStr | None = Field(default=None, max_length=120)
+    computer: StrictStr | None = Field(default=None, max_length=120)
+    software_version: StrictStr | None = Field(default=None, max_length=120)
+    source_kind: Literal["unconfigured", "normalized_json", "unsupported"]
+    export_description: StrictStr | None = Field(default=None, max_length=500)
+    permission_confirmed: StrictBool
+
+    @field_validator("model", "computer", "software_version", "export_description")
+    @classmethod
+    def normalize_optional_source_values(cls, value: str | None) -> str | None:
+        return _optional_label(value)
+
+
+class DeviceTokenRequest(StrictModel):
+    password: StrictStr = Field(min_length=1, max_length=128)
+
+
+class SourceReviewRequest(StrictModel):
+    message_count: StrictInt = Field(ge=1)
 
 
 def utc_timestamp(value: datetime) -> datetime:
@@ -157,8 +288,3 @@ class IngestBatch(StrictModel):
         if len(ids) != len(set(ids)):
             raise ValueError("event_id must be unique inside a batch")
         return self
-
-
-class LoginRequest(StrictModel):
-    account: str = Field(min_length=2, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
-    password: str = Field(min_length=12, max_length=256)

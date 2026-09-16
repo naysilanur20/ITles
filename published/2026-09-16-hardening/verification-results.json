@@ -1,7 +1,7 @@
 {
-  "verified_at_utc": "2026-09-16T11:59:00.035428+00:00",
-  "source_commit": "7ee40bfb4a640df511f99d95ed6a74893bfd7d68",
-  "source_fingerprint": "7f8b4c676a5768042b9d186c7426b4194c3c5bd8a19f6d9d6899f9f698f54feb",
+  "verified_at_utc": "2026-09-16T12:09:07.082082+00:00",
+  "source_commit": "490cf4f975396d8025babb50de1e8a70318e00fb",
+  "source_fingerprint": "f731153d1b4ba6ae2f90f88e9f2df7cea64e2f5f10565b3cb3c685114d711c04",
   "version_scope": "Source commit identifies implementation, tests and instructions. Evidence-only publication commit follows; verification-results.json is excluded from the SHA-256 fingerprint.",
   "evidence_level": "automated_and_synthetic_browser_not_real_machine",
   "baseline_commit": "4a236b2a158beb09d21387eb9dc7864a3c2d8230",
@@ -20,7 +20,7 @@
     "command": ".venv/bin/python -m pytest -q",
     "passed": 146,
     "failed": 0,
-    "seconds": 55.4,
+    "seconds": 62.59,
     "warnings": [
       "Starlette TestClient httpx deprecation",
       "anyio BlockingPortal alias deprecation"
@@ -43,7 +43,7 @@
     "records": 10000,
     "duplicate_deliveries": 10000,
     "total_m3": "1234.560000",
-    "ingest_and_retries_seconds": 1.044,
+    "ingest_and_retries_seconds": 1.041,
     "fleet_query_seconds": 0.05,
     "scope": "synthetic ASGI in-process; not physical network or machinery"
   },
@@ -51,20 +51,20 @@
     "command": "npm --prefix frontend run test:e2e",
     "passed": 7,
     "failed": 0,
-    "seconds": 23.5,
+    "seconds": 29.7,
     "address": "http://127.0.0.1:3100/",
     "configuration": "Playwright-owned full FastAPI server, temporary SQLite removed after run, demo and registration enabled, local HTTP-only cookie mode; no production data",
     "suite": "frontend/e2e/flows.e2e.ts",
     "scenarios": [
-      "UI company registration, preserve one-time recovery code until acknowledged, logout/login, machine and source persisted across reload",
+      "UI company registration, preserve one-time recovery code until acknowledged, gated real logout request and original-cookie revocation, login, machine and source persisted across reload",
       "UI invitation/activation, read-only employee API authorization, session termination and access revocation",
       "Device token issue/revoke and real HTTP synthetic ingestion, zero preserved, explicit source comparison, refresh on opening machine readings",
       "Two-company direct API and CSV isolation, administrative mutation rejection",
       "Clean demo and reentry, fixed dates, map, empty/invalid periods and CSV download",
       "Disabled demo/options failure simulated in browser, keyboard focus and mobile widths",
-      "Demo 503 simulated in browser, safe diagnostics, explicit successful retry"
+      "Demo HTML 405 and JSON 404 simulated in browser, safe diagnostics and explicit retry"
     ],
-    "network_mock_scope": "Only disabled/unavailable-demo/error UI scenarios intercept requests; all company/access/source/data flows use the real API.",
+    "network_mock_scope": "Disabled/unavailable-demo/error UI scenarios substitute responses. Registration additionally gates one logout request, then forwards it to the real server without substituting its response. All company/access/source/data flows use the real API.",
     "secret_artifacts": "Screenshots, traces and video disabled; only synthetic fixtures and assertion results retained."
   },
   "manual_browser": {
@@ -123,9 +123,9 @@
     "verification": "generator and archive regressions; report source fingerprint compared, not inferred from a historical run"
   },
   "github_ci": {
-    "result": "Previous head dbe6dc3eb4ca5222c1aefcc9165fdc887df387e4 passed both jobs; follow-up image archive regression must settle on the new PR head",
+    "result": "Previous head 63639ce4615f5b8659f94f8aa83ec6ec94a74ddb passed the pull_request workflow and both container jobs, but its push browser test raced logout. The fixed head requires fresh live CI results.",
     "workflow": ".github/workflows/verify.yml",
-    "previous_verified_run": "https://github.com/naysilanur20/ITles/actions/runs/35092634844",
+    "previous_verified_run": "https://github.com/naysilanur20/ITles/actions/runs/35093423652",
     "instruction": "Read live checks for the published head, not the previous result."
   },
   "limitations": [
@@ -146,5 +146,16 @@
     ],
     "local_checks": "146 Python, 67 frontend, 7 isolated browser scenarios passed; 14 focused delivery/deployment checks passed",
     "configuration_impact": "No new required environment variables, schema migrations or secret rotation; existing production defaults preserved"
+  },
+  "ci_logout_regression": {
+    "failed_run": "https://github.com/naysilanur20/ITles/actions/runs/35093418912/job/104784890058",
+    "cause": "The browser test checked /api/auth/me immediately after clicking logout, before POST /api/auth/logout completed; the session could correctly still return 200.",
+    "reproduction": "Holding the real logout request behind an explicit gate reproduced the same expected-401/received-200 failure locally before the fix.",
+    "fix": "All browser logout paths wait for the POST response and entry UI, then replay the original cookie and require 401. The gated scenario also checks that the app remains signed in with a disabled logout button while the request is pending.",
+    "repeat_command": "npm --prefix frontend run test:e2e -- --grep 'UI registration' --repeat-each=10",
+    "repeat_passed": 10,
+    "repeat_failed": 0,
+    "repeat_seconds": 53.3,
+    "scope": "Test synchronization only; no application, authentication policy, CI retries or timeout changes."
   }
 }

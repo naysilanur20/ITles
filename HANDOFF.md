@@ -57,8 +57,10 @@ npm --prefix frontend run test:e2e
 Снимки, trace и видео тестов отключены: формы показывают одноразовые секреты.
 
 Preview запускается репозиторным `.hoplite/run.sh`: полный FastAPI + собранный
-frontend, отдельная `.local/itles.sqlite3`, demo включён. Разрешение HTTP-cookie
-в этом локальном режиме не является настройкой production. В production — HTTPS,
+frontend, отдельная `.local/itles.sqlite3`, demo включён, Secure-cookie включены
+по умолчанию для HTTPS Preview. Только частный локальный HTTP-стенд запускается
+с явным `ITLES_COOKIE_SECURE=0`; это не настройка публичного Preview или production.
+В production — HTTPS,
 `ITLES_COOKIE_SECURE=1`, постоянный том и проверенная резервная копия.
 
 Инструкции: `docs/administrator.md`, `docs/user-guide.md`, `docs/deployment.md`,

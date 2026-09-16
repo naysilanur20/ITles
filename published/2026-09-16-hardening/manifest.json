@@ -1,31 +1,31 @@
 {
-  "source_commit": "0ef650f0632837fea45c154153c6de7d3e8607e4",
-  "source_fingerprint": "f5311b1bcd7046808ce0d17b00cc4aca6aa7ece8a112502dbe4f374f02a0bcf7",
-  "generated_at_utc": "2026-09-16T11:49:30.919253+00:00",
+  "source_commit": "7ee40bfb4a640df511f99d95ed6a74893bfd7d68",
+  "source_fingerprint": "7f8b4c676a5768042b9d186c7426b4194c3c5bd8a19f6d9d6899f9f698f54feb",
+  "generated_at_utc": "2026-09-16T11:59:00.035428+00:00",
   "files": {
     "harvesters_evidence.xlsx": {
-      "bytes": 70700,
-      "sha256": "59b2dc7f8cb3553277515420db1fa9566355fc4977c18be88bef2dc2368da7af"
+      "bytes": 70699,
+      "sha256": "8c71d22da1b15583028dc971687ed142dd356fc1250c3778954146198383fb3d"
     },
     "itles_deploy.zip": {
-      "bytes": 583932,
-      "sha256": "ba23af08106eebcd36623cf7b6e6e92e4c1c026f42b4c77624b63401aacddbb6"
+      "bytes": 584348,
+      "sha256": "132c2357fa5154ab3f448fb8ba44929390afbdad0117c58e0e4a03fa88b07d9a"
     },
     "itles_report.docx": {
-      "bytes": 97137,
-      "sha256": "3814f924952d6cb8b70d18482d940eee7cdce0b36e259525b69e0343fb722e03"
+      "bytes": 97552,
+      "sha256": "31e13737e33eedc46a5cc6566ded7f94bb519384e382458e2382239b7b42f7d7"
     },
     "itles_report.md": {
-      "bytes": 189595,
-      "sha256": "bf3a904be1b23a1f10361be1e9743edf87f3230b6d4c60eb371a1eab08012342"
+      "bytes": 190519,
+      "sha256": "ba4f3bcc5dfc56df3f7217fe84f9c8206dfeaa9f8417ce5c3c6d297b5211c9dd"
     },
     "itles_report.pdf": {
-      "bytes": 243185,
-      "sha256": "930a39172c7f8b75955dc0ccbdfdea963abf63235e7611c5d451c72229b32958"
+      "bytes": 244558,
+      "sha256": "09e6ba0577c3a6c21e855433f29116e59665bb2ab7287fd922f7a8c2395f27e1"
     },
     "itles_source.zip": {
-      "bytes": 584976,
-      "sha256": "3dfdd28c6b97bc39e3ab0ddc1f4391847e8c9154610939374d651f635ebb9c4d"
+      "bytes": 585392,
+      "sha256": "d3b8a3e1f140347e772957414a178c5930e082f268ae7152b8c4ba81999a2324"
     }
   }
 }

@@ -1328,9 +1328,9 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
 
 ```json
 {
-  "verified_at_utc": "2026-09-16T11:49:30.919253+00:00",
-  "source_commit": "0ef650f0632837fea45c154153c6de7d3e8607e4",
-  "source_fingerprint": "f5311b1bcd7046808ce0d17b00cc4aca6aa7ece8a112502dbe4f374f02a0bcf7",
+  "verified_at_utc": "2026-09-16T11:59:00.035428+00:00",
+  "source_commit": "7ee40bfb4a640df511f99d95ed6a74893bfd7d68",
+  "source_fingerprint": "7f8b4c676a5768042b9d186c7426b4194c3c5bd8a19f6d9d6899f9f698f54feb",
   "version_scope": "Source commit identifies implementation, tests and instructions. Evidence-only publication commit follows; verification-results.json is excluded from the SHA-256 fingerprint.",
   "evidence_level": "automated_and_synthetic_browser_not_real_machine",
   "baseline_commit": "4a236b2a158beb09d21387eb9dc7864a3c2d8230",
@@ -1342,13 +1342,14 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
   "setup": {
     "command": "bash .hoplite/setup.sh",
     "result": "passed",
-    "scope": "locked dependencies, production frontend build, XLSX/DOCX/PDF/ZIP generation"
+    "scope": "locked dependencies, production frontend build, XLSX/DOCX/PDF/ZIP generation",
+    "verified_source_commit": "0ef650f0632837fea45c154153c6de7d3e8607e4"
   },
   "python": {
     "command": ".venv/bin/python -m pytest -q",
     "passed": 146,
     "failed": 0,
-    "seconds": 56.71,
+    "seconds": 55.4,
     "warnings": [
       "Starlette TestClient httpx deprecation",
       "anyio BlockingPortal alias deprecation"
@@ -1362,7 +1363,8 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
   "build": {
     "command": "npm --prefix frontend run build",
     "result": "passed",
-    "vite_version": "6.4.3"
+    "vite_version": "6.4.3",
+    "scope": "Production build repeated by the isolated Playwright webServer before E2E"
   },
   "stress": {
     "command": ".venv/bin/python -m scripts.stress_synthetic --records 10000",
@@ -1370,15 +1372,15 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "records": 10000,
     "duplicate_deliveries": 10000,
     "total_m3": "1234.560000",
-    "ingest_and_retries_seconds": 1.461,
-    "fleet_query_seconds": 0.052,
+    "ingest_and_retries_seconds": 1.044,
+    "fleet_query_seconds": 0.05,
     "scope": "synthetic ASGI in-process; not physical network or machinery"
   },
   "browser_e2e": {
     "command": "npm --prefix frontend run test:e2e",
     "passed": 7,
     "failed": 0,
-    "seconds": 23.2,
+    "seconds": 23.5,
     "address": "http://127.0.0.1:3100/",
     "configuration": "Playwright-owned full FastAPI server, temporary SQLite removed after run, demo and registration enabled, local HTTP-only cookie mode; no production data",
     "suite": "frontend/e2e/flows.e2e.ts",
@@ -1417,7 +1419,8 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
       "focus/surface": 7.06,
       "control/surface": 3.85
     },
-    "contrast_scope": "Measured current CSS token pairs, not a full WCAG certification"
+    "contrast_scope": "Measured current CSS token pairs, not a full WCAG certification",
+    "verified_source_commit": "0ef650f0632837fea45c154153c6de7d3e8607e4"
   },
   "restart_backup": {
     "test": "tests/test_restart.py",
@@ -1449,9 +1452,10 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "verification": "generator and archive regressions; report source fingerprint compared, not inferred from a historical run"
   },
   "github_ci": {
-    "result": "not claimed by local evidence",
+    "result": "Previous head dbe6dc3eb4ca5222c1aefcc9165fdc887df387e4 passed both jobs; follow-up image archive regression must settle on the new PR head",
     "workflow": ".github/workflows/verify.yml",
-    "instruction": "Read live checks for the published PR head; includes separate Docker job and isolated browser suite."
+    "previous_verified_run": "https://github.com/naysilanur20/ITles/actions/runs/35092634844",
+    "instruction": "Read live checks for the published head, not the previous result."
   },
   "limitations": [
     "No customer URL or conditions for external demo failure",
@@ -1462,7 +1466,16 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "Single-process SQLite and process-local authentication throttles",
     "No full screen-reader/accessibility audit; CSS zoom is not browser zoom",
     "No claim of real-file or real-machine readiness"
-  ]
+  ],
+  "release_followup": {
+    "change": "Include HANDOFF and browser test sources/config in Docker context; run delivery regressions inside the built image",
+    "files": [
+      ".dockerignore",
+      ".github/workflows/verify.yml"
+    ],
+    "local_checks": "146 Python, 67 frontend, 7 isolated browser scenarios passed; 14 focused delivery/deployment checks passed",
+    "configuration_impact": "No new required environment variables, schema migrations or secret rotation; existing production defaults preserved"
+  }
 }
 
 ```

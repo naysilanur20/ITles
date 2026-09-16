@@ -293,7 +293,27 @@ Python API и SQLite**. Тогда `GET /api/health` может возвраща
 200, а `POST /api/auth/login` и `POST /api/auth/demo` — Nginx 405.
 Успешная сборка фронтенда не доказывает работоспособность входа.
 HTML/405 от статического nginx встречался в прежнем размещении. Это не диагноз
-нынешнего отказа: точный адрес пользовательского сбоя пока не предоставлен.
+отказа от 16.09.2026: пользователь сообщил HTTPS-адрес Preview и отказ
+`session_not_retained` после принятого входа (12:59:04.835 UTC).
+
+## Вход из встроенного Preview
+
+Ключ для учебного парка не нужен. Во встроенном окне нажмите
+«Открыть ИТлес в новой вкладке», затем «Посмотреть демо».
+Вход и регистрация выполняются только в отдельной вкладке: `SameSite=Strict`
+не позволяет использовать сеанс в iframe другого сайта. Браузерная регрессия
+воспроизводит принятый POST (200), отсутствие сохранённой cookie и последующий
+`/api/auth/me` (401); переход в отдельную вкладку проверен с входом, reload и выходом.
+
+Это подтверждает дефект встроенного сценария, но не доказывает исправность
+внешнего шлюза: адрес пользователя в агентском браузере требует авторизации
+Hoplite. Его заголовки Cookie/Set-Cookie сквозным тестом не проверены.
+Если ошибка возникает и в отдельной вкладке, проверяйте прокси и хранение сеансов,
+не отключайте защиту cookies. Диагностика теперь указывает контекст окна.
+
+`.hoplite/run.sh` по умолчанию включает `ITLES_COOKIE_SECURE=1` для HTTPS Preview.
+Исключение `ITLES_COOKIE_SECURE=0` допускается только при явном запуске частного
+локального HTTP-стенда; браузерные тесты используют собственную временную БД.
 
 ## Deploy-F: архив с собственным Dockerfile
 
@@ -1328,9 +1348,9 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
 
 ```json
 {
-  "verified_at_utc": "2026-09-16T12:09:07.082082+00:00",
-  "source_commit": "490cf4f975396d8025babb50de1e8a70318e00fb",
-  "source_fingerprint": "f731153d1b4ba6ae2f90f88e9f2df7cea64e2f5f10565b3cb3c685114d711c04",
+  "verified_at_utc": "2026-09-16T13:16:54.458467+00:00",
+  "source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee",
+  "source_fingerprint": "71cc1f7c90ba1acf15174875fc294aef700a902cef389c2543b5a7ecce736579",
   "version_scope": "Source commit identifies implementation, tests and instructions. Evidence-only publication commit follows; verification-results.json is excluded from the SHA-256 fingerprint.",
   "evidence_level": "automated_and_synthetic_browser_not_real_machine",
   "baseline_commit": "4a236b2a158beb09d21387eb9dc7864a3c2d8230",
@@ -1343,13 +1363,13 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "command": "bash .hoplite/setup.sh",
     "result": "passed",
     "scope": "locked dependencies, production frontend build, XLSX/DOCX/PDF/ZIP generation",
-    "verified_source_commit": "0ef650f0632837fea45c154153c6de7d3e8607e4"
+    "verified_source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee"
   },
   "python": {
     "command": ".venv/bin/python -m pytest -q",
     "passed": 146,
     "failed": 0,
-    "seconds": 62.59,
+    "seconds": 45.13,
     "warnings": [
       "Starlette TestClient httpx deprecation",
       "anyio BlockingPortal alias deprecation"
@@ -1367,6 +1387,7 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "scope": "Production build repeated by the isolated Playwright webServer before E2E"
   },
   "stress": {
+    "verified_source_commit": "490cf4f975396d8025babb50de1e8a70318e00fb",
     "command": ".venv/bin/python -m scripts.stress_synthetic --records 10000",
     "result": "passed",
     "records": 10000,
@@ -1378,12 +1399,12 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
   },
   "browser_e2e": {
     "command": "npm --prefix frontend run test:e2e",
-    "passed": 7,
+    "passed": 9,
     "failed": 0,
-    "seconds": 29.7,
+    "seconds": 21.0,
     "address": "http://127.0.0.1:3100/",
     "configuration": "Playwright-owned full FastAPI server, temporary SQLite removed after run, demo and registration enabled, local HTTP-only cookie mode; no production data",
-    "suite": "frontend/e2e/flows.e2e.ts",
+    "suite": "frontend/e2e/flows.e2e.ts and frontend/e2e/embedded-auth.e2e.ts",
     "scenarios": [
       "UI company registration, preserve one-time recovery code until acknowledged, gated real logout request and original-cookie revocation, login, machine and source persisted across reload",
       "UI invitation/activation, read-only employee API authorization, session termination and access revocation",
@@ -1391,9 +1412,11 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
       "Two-company direct API and CSV isolation, administrative mutation rejection",
       "Clean demo and reentry, fixed dates, map, empty/invalid periods and CSV download",
       "Disabled demo/options failure simulated in browser, keyboard focus and mobile widths",
-      "Demo HTML 405 and JSON 404 simulated in browser, safe diagnostics and explicit retry"
+      "Demo HTML 405 and JSON 404 simulated in browser, safe diagnostics and explicit retry",
+      "Cross-site iframe with real API: POST /auth/demo 200, missing Strict cookie, GET /auth/me 401",
+      "Embedded UI sends no auth mutation; standalone link, demo without key, confirmed session, reload and logout"
     ],
-    "network_mock_scope": "Disabled/unavailable-demo/error UI scenarios substitute responses. Registration additionally gates one logout request, then forwards it to the real server without substituting its response. All company/access/source/data flows use the real API.",
+    "network_mock_scope": "Disabled/unavailable-demo/error UI scenarios substitute responses. Registration gates one logout request, then forwards it to the real server. Embedded tests substitute only parent HTML; localhost parent receives local-network-access permission to load the real loopback app. Browser cookie policy and application/API responses are not modified.",
     "secret_artifacts": "Screenshots, traces and video disabled; only synthetic fixtures and assertion results retained."
   },
   "manual_browser": {
@@ -1428,14 +1451,19 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "scope": "separate cold ASGI processes, session/fresh login/settings/events/exact CSV/duplicate delivery, verified backup and restore to a new database; no TCP/TLS or Docker"
   },
   "demo_incident": {
-    "user_url": null,
-    "root_cause_at_user_url": "not established",
+    "user_url": "HTTPS Hoplite Preview; private hostname redacted",
+    "reported_at_utc": "2026-09-16T12:59:04.835Z",
+    "reported_build": "490cf4f97539",
+    "reported_code": "session_not_retained",
+    "root_cause_at_user_url": "Cross-site iframe session failure reproduced locally. User window context and authenticated external proxy behavior remain unverified: external address redirects agent browser to Hoplite login.",
     "confirmed_code_defects": [
       "registration could reserve the demo account before seed",
       "ingest could reserve fixed demo event UUIDs before seed",
-      "existing seed identity collision returned unhandled 500"
+      "existing seed identity collision returned unhandled 500",
+      "embedded login offered cookie-dependent auth in a cross-site frame where Strict cookies cannot be retained"
     ],
-    "current_behavior": "reserved identifiers rejected; existing conflict gets 503 JSON with rollback, no deletion of other organizations or sessions"
+    "current_behavior": "reserved identifiers rejected; existing conflict gets 503 JSON with rollback. Embedded entry now opens a standalone tab before auth; no key needed for demo. Strict/HttpOnly and confirmed-session check unchanged; HTTPS Preview defaults to Secure=1. No company/session deletion.",
+    "managed_preview": "Blocked after deliberate process restart to apply Secure default: preview_start returns old exited PID and cannot relaunch. Repository setup succeeds; sandbox_restart is not configured. Temporary run override did not help and was cleared. Reported to platform; no claim of current external readiness."
   },
   "delivery": {
     "generator": ".venv/bin/python -m scripts.build_deliverables",
@@ -1452,13 +1480,14 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "verification": "generator and archive regressions; report source fingerprint compared, not inferred from a historical run"
   },
   "github_ci": {
-    "result": "Previous head 63639ce4615f5b8659f94f8aa83ec6ec94a74ddb passed the pull_request workflow and both container jobs, but its push browser test raced logout. The fixed head requires fresh live CI results.",
+    "result": "At source head 5f8ef52 both container jobs and push synthetic job passed; pull_request synthetic job was still running at the observed snapshot. Publication head needs live checks. CI does not validate the authenticated external Preview.",
     "workflow": ".github/workflows/verify.yml",
     "previous_verified_run": "https://github.com/naysilanur20/ITles/actions/runs/35093423652",
     "instruction": "Read live checks for the published head, not the previous result."
   },
   "limitations": [
-    "No customer URL or conditions for external demo failure",
+    "User supplied URL and diagnostics; external authenticated proxy and user browser window context remain unverified",
+    "Managed Preview relaunch blocked by platform lifecycle; successful isolated E2E is not current user access",
     "No customer server changed; real HTTPS/storage/backup configuration unverified",
     "Docker is absent locally; container execution must be checked separately in hosted CI",
     "No OEM reference file, universal OEM/CAN/StanForD adapter, real machine or calibration test",
@@ -1473,10 +1502,12 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
       ".dockerignore",
       ".github/workflows/verify.yml"
     ],
-    "local_checks": "146 Python, 67 frontend, 7 isolated browser scenarios passed; 14 focused delivery/deployment checks passed",
-    "configuration_impact": "No new required environment variables, schema migrations or secret rotation; existing production defaults preserved"
+    "local_checks": "146 Python, 67 frontend, 9 isolated browser scenarios passed; TypeScript and production build passed",
+    "configuration_impact": "Preview run defaults ITLES_COOKIE_SECURE to 1 for HTTPS; local HTTP tests explicitly use 0. No new required variables, secrets, schema, IAM, DNS, Terraform, cron, OAuth, webhook or feature-flag provisioning. No project script overrides retained.",
+    "before_merge": "Restore managed Preview and verify user-facing HTTPS standalone demo admission, /me, reload and logout. Do not merge on isolated CI alone."
   },
   "ci_logout_regression": {
+    "verified_source_commit": "490cf4f975396d8025babb50de1e8a70318e00fb",
     "failed_run": "https://github.com/naysilanur20/ITles/actions/runs/35093418912/job/104784890058",
     "cause": "The browser test checked /api/auth/me immediately after clicking logout, before POST /api/auth/logout completed; the session could correctly still return 200.",
     "reproduction": "Holding the real logout request behind an explicit gate reproduced the same expected-401/received-200 failure locally before the fix.",

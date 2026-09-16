@@ -11,27 +11,40 @@ from collections import deque
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Iterator
+from urllib.parse import urlsplit
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .db import canonical_hash, connect, default_db_path, hash_secret, initialize, iso, new_id, password_matches, utcnow
-from .schemas import IngestBatch, LoginRequest, METRICS
+from .db import (
+    canonical_hash, connect, default_db_path, hash_secret, initialize, iso, issue_activation_code, new_id,
+    password_hash, password_matches, password_needs_upgrade, utcnow,
+)
+from .schemas import (
+    ActivationRequest, CompanyPatch, DeviceTokenRequest, IngestBatch, LoginRequest,
+    MachineCreateRequest, METRICS, OnboardingPatch, PasswordChangeRequest,
+    RecoveryCodeRequest, RecoveryRequest, RegisterRequest, SourcePatch, SourceReviewRequest, UserCreateRequest,
+)
 from .seed import seed_demo
 
 SESSION_COOKIE = "itles_session"
 FRESH_TTL = timedelta(hours=2)
 MAX_INGEST_BYTES = 512 * 1024
+MAX_ACCOUNT_BYTES = 16 * 1024
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LOGIN_LIMIT = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_LOCK_SECONDS = 15 * 60
 LOGIN_TRACKED_ACCOUNTS = 1024
+AUTH_GLOBAL_LIMIT = 120
+AUTH_GLOBAL_WINDOW_SECONDS = 15 * 60
 DEMO_LOGIN_LIMIT = 20
 DEMO_LOGIN_WINDOW_SECONDS = 10 * 60
 DEMO_SESSION_CAP = 128
 DEMO_SESSION_SECONDS = 3600
+USER_SESSION_SECONDS = 7 * 86400
+RECOVERY_CODE_TTL = timedelta(days=30)
 DUMMY_PASSWORD_HASH = "pbkdf2_sha256$9e347f8194a6f1de7b8ce4477dceff8a$7f293bd9efbc9f3cd24f5a75a8ad099bd1d2f8ae283e550cbfc6d68d4ba6653f"
 
 
@@ -90,24 +103,78 @@ class DemoLoginLimiter:
 
 
 LOGIN_LIMITER = LoginLimiter()
+REGISTRATION_LIMITER = LoginLimiter()
+ACTIVATION_LIMITER = LoginLimiter()
+RECOVERY_LIMITER = LoginLimiter()
+REAUTH_LIMITER = LoginLimiter()
 DEMO_LOGIN_LIMITER = DemoLoginLimiter()
+
+
+class AuthBudget:
+    """Bound total authentication work so identifier spraying cannot grow unbounded."""
+
+    def __init__(self):
+        self._attempts: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def allowed(self) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            while self._attempts and self._attempts[0] <= now - AUTH_GLOBAL_WINDOW_SECONDS:
+                self._attempts.popleft()
+            if len(self._attempts) >= AUTH_GLOBAL_LIMIT:
+                return False
+            self._attempts.append(now)
+            return True
+
+
+AUTH_BUDGET = AuthBudget()
 
 
 def _demo_enabled() -> bool:
     return os.getenv("ITLES_DEMO_ENABLED", "0").lower() in {"1", "true", "yes"}
 
 
-class IngestSizeLimitMiddleware:
-    """Bound buffered ingest payloads before Pydantic parses their JSON."""
+def _registration_enabled() -> bool:
+    return os.getenv("ITLES_REGISTRATION_ENABLED", "1").lower() in {"1", "true", "yes"}
+
+
+class ApiRequestGuardMiddleware:
+    """Check browser mutation origin and bounds before FastAPI parses JSON bodies."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope["path"] not in {"/api/ingest", "/api/auth/login"}:
+        if scope["type"] != "http" or not scope["path"].startswith("/api/") or scope["method"] in {"GET", "HEAD", "OPTIONS"}:
             await self.app(scope, receive, send)
             return
 
+        headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
+        is_ingest = scope["path"] == "/api/ingest"
+        if not is_ingest:
+            origin = headers.get("origin")
+            host = headers.get("host", "")
+            try:
+                parsed_origin = urlsplit(origin) if origin else None
+                foreign_origin = parsed_origin is not None and (
+                    parsed_origin.scheme not in {"http", "https"} or parsed_origin.netloc != host
+                    or bool(parsed_origin.path or parsed_origin.query or parsed_origin.fragment)
+                )
+            except ValueError:
+                foreign_origin = True
+            if headers.get("sec-fetch-site") == "cross-site" or foreign_origin:
+                await JSONResponse({"detail": "cross-origin mutation is not allowed"}, status_code=403)(scope, receive, send)
+                return
+        try:
+            declared_size = int(headers.get("content-length", "0"))
+        except ValueError:
+            await JSONResponse({"detail": "invalid request body length"}, status_code=400)(scope, receive, send)
+            return
+        maximum = MAX_INGEST_BYTES if is_ingest else MAX_ACCOUNT_BYTES
+        if declared_size < 0 or declared_size > maximum:
+            await JSONResponse({"detail": "request body is too large"}, status_code=413)(scope, receive, send)
+            return
         messages = []
         size = 0
         while True:
@@ -115,13 +182,20 @@ class IngestSizeLimitMiddleware:
             messages.append(message)
             if message["type"] == "http.request":
                 size += len(message.get("body", b""))
-                if size > MAX_INGEST_BYTES:
-                    await JSONResponse({"detail": "ingest request body is too large"}, status_code=413)(scope, receive, send)
+                if size > maximum:
+                    await JSONResponse({"detail": "request body is too large"}, status_code=413)(scope, receive, send)
                     return
                 if not message.get("more_body", False):
                     break
             elif message["type"] == "http.disconnect":
                 break
+
+        content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        # Content-Length is advisory. Check the buffered byte count too so a
+        # chunked or malformed request cannot bypass the JSON boundary.
+        if (is_ingest or size) and content_type != "application/json":
+            await JSONResponse({"detail": "JSON content type is required"}, status_code=415)(scope, receive, send)
+            return
 
         index = 0
 
@@ -183,7 +257,15 @@ def _machine_payload(conn: sqlite3.Connection, organization_id: str, machine: sq
     ):
         latest.setdefault(row["metric_key"], row)
     position = conn.execute("SELECT * FROM positions WHERE machine_id=? ORDER BY observed_at DESC LIMIT 1", (machine["id"],)).fetchone()
-    seen = conn.execute("SELECT MAX(occurred_at) AS value FROM events WHERE machine_id=?", (machine["id"],)).fetchone()["value"]
+    message_times = conn.execute(
+        "SELECT MAX(occurred_at) observed,MAX(received_at) received FROM events WHERE organization_id=? AND machine_id=?",
+        (organization_id, machine["id"]),
+    ).fetchone()
+    seen = message_times["observed"]
+    received = conn.execute(
+        "SELECT MAX(received_at) FROM ingest_audit WHERE organization_id=? AND machine_id=? AND status IN ('accepted','duplicates')",
+        (organization_id, machine["id"]),
+    ).fetchone()[0] or message_times["received"]
     position_payload = None
     if position:
         observed = datetime.fromisoformat(position["observed_at"].replace("Z", "+00:00"))
@@ -193,7 +275,7 @@ def _machine_payload(conn: sqlite3.Connection, organization_id: str, machine: sq
     return {"id": machine["id"], "name": machine["name"], "model": machine["model"], "head": machine["head"],
             "computer": machine["computer"], "connection_status": connection_status,
             "metrics": [_metric_value(latest.get(key), key) for key in METRICS], "position": position_payload,
-            "last_seen": seen}
+            "last_seen": seen, "last_received_at": received}
 
 
 def _totals(conn: sqlite3.Connection, organization_id: str, start: date, end: date, machine_id: str | None = None) -> list[dict]:
@@ -262,9 +344,150 @@ def _has_engine_hour_reset(conn: sqlite3.Connection, organization_id: str) -> bo
     return False
 
 
+def _machine_identity(machine: sqlite3.Row) -> dict:
+    return {
+        "id": machine["id"], "name": machine["name"], "model": machine["model"],
+        "head": machine["head"], "computer": machine["computer"],
+    }
+
+
+def _onboarding_payload(conn: sqlite3.Connection, organization_id: str) -> dict:
+    machine_added = conn.execute(
+        "SELECT 1 FROM machines WHERE organization_id=? LIMIT 1", (organization_id,)
+    ).fetchone() is not None
+    source_configured = conn.execute(
+        """SELECT 1 FROM machine_sources source JOIN machines machine ON machine.id=source.machine_id
+           WHERE source.organization_id=? AND machine.organization_id=?
+             AND source.source_kind='normalized_json' AND source.permission_confirmed=1
+             AND EXISTS (SELECT 1 FROM device_tokens token WHERE token.machine_id=source.machine_id
+                         AND token.organization_id=source.organization_id) LIMIT 1""",
+        (organization_id, organization_id),
+    ).fetchone() is not None
+    data_received = conn.execute(
+        "SELECT 1 FROM events WHERE organization_id=? LIMIT 1", (organization_id,),
+    ).fetchone() is not None
+    data_reviewed = conn.execute(
+        "SELECT 1 FROM machine_sources WHERE organization_id=? AND reviewed_at IS NOT NULL AND reviewed_event_count>0 LIMIT 1",
+        (organization_id,),
+    ).fetchone() is not None
+    first_machine_ready = conn.execute(
+        """SELECT 1 FROM machine_sources source WHERE organization_id=?
+           AND source_kind='normalized_json' AND permission_confirmed=1 AND reviewed_event_count>0
+           AND EXISTS (SELECT 1 FROM device_tokens token WHERE token.machine_id=source.machine_id
+                       AND token.organization_id=source.organization_id) LIMIT 1""", (organization_id,),
+    ).fetchone() is not None
+    saved = conn.execute(
+        "SELECT step,users_configured FROM onboarding WHERE organization_id=?", (organization_id,)
+    ).fetchone()
+    users_configured = bool(saved["users_configured"]) if saved else False
+    if saved:
+        step = saved["step"]
+    elif not machine_added:
+        step = "machine"
+    elif not users_configured:
+        step = "users"
+    elif not source_configured:
+        step = "source"
+    else:
+        step = "complete"
+    return {
+        "completed": users_configured and first_machine_ready,
+        "step": step,
+        "machine_added": machine_added,
+        "users_configured": users_configured,
+        "source_configured": source_configured,
+        "data_received": data_received,
+        "data_reviewed": data_reviewed,
+    }
+
+
+def _source_payload(conn: sqlite3.Connection, organization_id: str, machine: sqlite3.Row) -> dict:
+    source = conn.execute(
+        "SELECT * FROM machine_sources WHERE machine_id=? AND organization_id=?",
+        (machine["id"], organization_id),
+    ).fetchone()
+    # Metadata is separate from bearer-token hashes. It is backfilled here for
+    # a token created by a pre-v2 CLI without ever returning that credential.
+    tokens = []
+    for token in conn.execute(
+        """SELECT token.token_hash,token.created_at,metadata.id FROM device_tokens token
+           LEFT JOIN device_token_metadata metadata ON metadata.token_hash=token.token_hash
+           WHERE token.organization_id=? AND token.machine_id=? ORDER BY token.created_at DESC""",
+        (organization_id, machine["id"]),
+    ):
+        token_id = token["id"]
+        if not token_id:
+            token_id = new_id()
+            conn.execute(
+                "INSERT OR IGNORE INTO device_token_metadata(token_hash,id,created_at) VALUES(?,?,?)",
+                (token["token_hash"], token_id, token["created_at"]),
+            )
+        tokens.append({"id": token_id, "created_at": token["created_at"]})
+
+    facts = conn.execute(
+        """SELECT COUNT(*) message_count,MAX(received_at) last_received_at,MAX(occurred_at) last_observed_at
+           FROM events WHERE organization_id=? AND machine_id=?""",
+        (organization_id, machine["id"]),
+    ).fetchone()
+    last_position = conn.execute(
+        "SELECT MAX(observed_at) value FROM positions WHERE machine_id=?", (machine["id"],)
+    ).fetchone()["value"]
+    message_count = facts["message_count"]
+    last_received = facts["last_received_at"]
+    last_received = conn.execute(
+        "SELECT MAX(received_at) FROM ingest_audit WHERE organization_id=? AND machine_id=? AND status IN ('accepted','duplicates')",
+        (organization_id, machine["id"]),
+    ).fetchone()[0] or last_received
+    last_observed = facts["last_observed_at"]
+    reviewed_at = source["reviewed_at"] if source else None
+    source_kind = source["source_kind"] if source else "unconfigured"
+
+    def stale(value: str | None) -> bool:
+        if not value:
+            return False
+        try:
+            return utcnow() - datetime.fromisoformat(value.replace("Z", "+00:00")) > FRESH_TTL
+        except ValueError:
+            return True
+
+    if not source:
+        state = "added"
+    elif source_kind != "normalized_json" or not source["permission_confirmed"]:
+        state = "source_unconfigured"
+    elif not message_count and not tokens:
+        state = "source_unconfigured"
+    elif not message_count:
+        state = "awaiting_message"
+    elif stale(last_observed) or stale(last_received):
+        # A recently delivered file can still contain stale observations.
+        state = "stale"
+    elif not reviewed_at or source["reviewed_event_count"] < message_count:
+        state = "review_required"
+    else:
+        state = "message_received"
+
+    return {
+        "machine": _machine_identity(machine),
+        "onboarding": _onboarding_payload(conn, organization_id),
+        "source": {
+            "model": source["model"] if source else machine["model"],
+            "computer": source["computer"] if source else machine["computer"],
+            "software_version": source["software_version"] if source else None,
+            "source_kind": source_kind,
+            "export_description": source["export_description"] if source else None,
+            "permission_confirmed": bool(source["permission_confirmed"]) if source else False,
+        },
+        "connection": {
+            "state": state, "last_received_at": last_received, "last_observed_at": last_observed,
+            "last_position_at": last_position, "reviewed_at": reviewed_at, "message_count": message_count,
+        },
+        "tokens": tokens,
+    }
+
+
 def create_app(db_path: str | None = None) -> FastAPI:
-    app = FastAPI(title="ITles telemetry API", version="1.0", docs_url=None, redoc_url=None)
-    app.add_middleware(IngestSizeLimitMiddleware)
+    app = FastAPI(title="ITles telemetry API", version="2.0", docs_url=None, redoc_url=None)
+    app.add_middleware(ApiRequestGuardMiddleware)
     app.state.db_path = db_path or default_db_path()
     init_lock = threading.Lock()
     initialized = False
@@ -294,6 +517,21 @@ def create_app(db_path: str | None = None) -> FastAPI:
         conn.execute("INSERT INTO ingest_audit(organization_id,machine_id,received_at,status,reason) VALUES(?,?,?,?,?)",
                      (org, machine, iso(utcnow()), status, reason))
 
+    @app.middleware("http")
+    async def api_diagnostics(request: Request, call_next):
+        request_id = secrets.token_urlsafe(12)
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-ITles-Version"] = app.version
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def database_unavailable(_request: Request, _exc: sqlite3.OperationalError):
+        return JSONResponse({"detail": "service temporarily unavailable", "code": "database_unavailable"}, status_code=503)
+
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, _exc: RequestValidationError):
         # Never echo rejected payloads: they may contain data that must not be retained or exposed.
@@ -312,15 +550,49 @@ def create_app(db_path: str | None = None) -> FastAPI:
             return JSONResponse({"detail": "invalid ingest schema"}, status_code=422)
         return JSONResponse({"detail": "invalid request"}, status_code=422)
 
+    def permit_auth_attempt(limiter: LoginLimiter, identifier: str) -> None:
+        if not limiter.allowed(identifier) or not AUTH_BUDGET.allowed():
+            raise HTTPException(429, "too many authentication attempts; try again later")
+
     def current_session(itles_session: str | None = Cookie(default=None)) -> dict:
         if not itles_session:
             raise HTTPException(401, "authentication required")
+        token_hash = hash_secret(itles_session)
+        now = iso(utcnow())
         with db() as conn:
-            row = conn.execute("""SELECT o.id,o.name,o.is_demo,s.expires_at FROM sessions s JOIN organizations o ON o.id=s.organization_id
-                                  WHERE s.token_hash=?""", (hash_secret(itles_session),)).fetchone()
-            if not row or row["expires_at"] <= iso(utcnow()):
-                raise HTTPException(401, "authentication required")
-            return dict(row)
+            row = conn.execute(
+                """SELECT o.id,o.name,o.account,o.is_demo,session.expires_at,
+                          user.id user_id,user.login,user.role,user.must_change_password,user.legacy_access
+                   FROM user_sessions session JOIN users user ON user.id=session.user_id
+                   JOIN organizations o ON o.id=session.organization_id
+                   WHERE session.token_hash=? AND session.expires_at>? AND o.is_demo=0
+                     AND user.status='active' AND user.organization_id=session.organization_id""",
+                (token_hash, now),
+            ).fetchone()
+            if row:
+                return dict(row)
+            # v1 organization sessions are never principals for real companies.
+            # They are retained only for anonymous, read-only demo admission.
+            demo = conn.execute(
+                """SELECT o.id,o.name,o.account,o.is_demo,session.expires_at,
+                          NULL user_id,NULL login,NULL role,0 must_change_password
+                   FROM sessions session JOIN organizations o ON o.id=session.organization_id
+                   WHERE session.token_hash=? AND session.expires_at>? AND o.is_demo=1""",
+                (token_hash, now),
+            ).fetchone()
+            if demo:
+                return dict(demo)
+        raise HTTPException(401, "authentication required")
+
+    def require_admin(session: dict = Depends(current_session)) -> dict:
+        if session.get("is_demo") or session.get("role") != "admin":
+            raise HTTPException(403, "administrator access required")
+        return session
+
+    def require_sensitive_admin(session: dict = Depends(require_admin)) -> dict:
+        if session.get("must_change_password"):
+            raise HTTPException(403, "password change required before this action")
+        return session
 
     def device_identity(authorization: str | None = Header(default=None)) -> dict:
         if not authorization or not authorization.startswith("Bearer "):
@@ -332,34 +604,50 @@ def create_app(db_path: str | None = None) -> FastAPI:
             row = conn.execute("SELECT organization_id,machine_id FROM device_tokens WHERE token_hash=?", (hash_secret(token),)).fetchone()
             if not row:
                 raise HTTPException(401, "invalid device token")
-            return dict(row)
+            return dict(row) | {"token_hash": hash_secret(token)}
 
-    def set_session(response: Response, org_id: str, *, is_demo: bool) -> None:
-        token = secrets.token_urlsafe(32)
-        lifetime = DEMO_SESSION_SECONDS if is_demo else 7 * 86400
-        with db() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            now = utcnow()
-            conn.execute("DELETE FROM sessions WHERE expires_at<=?", (iso(now),))
-            at_capacity = is_demo and conn.execute(
-                "SELECT COUNT(*) count FROM sessions WHERE organization_id=?", (org_id,),
-            ).fetchone()["count"] >= DEMO_SESSION_CAP
-            if not at_capacity:
-                conn.execute("INSERT INTO sessions(token_hash,organization_id,expires_at) VALUES(?,?,?)",
-                             (hash_secret(token), org_id, iso(now + timedelta(seconds=lifetime))))
-        # Commit expired-session cleanup even when admission is refused.
-        if at_capacity:
-            raise HTTPException(429, "demo session capacity reached; try again later")
+    def set_session_cookie(response: Response, token: str, lifetime: int) -> None:
         response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict",
                             secure=os.getenv("ITLES_COOKIE_SECURE", "1") == "1", max_age=lifetime, path="/")
 
+    def create_user_session(conn: sqlite3.Connection, user_id: str, organization_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        conn.execute(
+            "INSERT INTO user_sessions(token_hash,user_id,organization_id,expires_at) VALUES(?,?,?,?)",
+            (hash_secret(token), user_id, organization_id, iso(utcnow() + timedelta(seconds=USER_SESSION_SECONDS))),
+        )
+        return token
+
+    def issue_recovery_code(conn: sqlite3.Connection, user_id: str) -> str:
+        code = secrets.token_urlsafe(24)
+        now = utcnow()
+        conn.execute("DELETE FROM recovery_codes WHERE user_id=?", (user_id,))
+        conn.execute(
+            "INSERT INTO recovery_codes(user_id,code_hash,expires_at,issued_at) VALUES(?,?,?,?)",
+            (user_id, hash_secret(code), iso(now + RECOVERY_CODE_TTL), iso(now)),
+        )
+        return code
+
     def session_payload(row: dict | sqlite3.Row) -> dict:
-        result = {"organization": {"id": row["id"], "name": row["name"]}, "demo": bool(row["is_demo"])}
+        result = {
+            "organization": {"id": row["id"], "name": row["name"], "account": row["account"]},
+            "user": None,
+            "demo": bool(row["is_demo"]),
+        }
         if row["is_demo"]:
             with db() as conn:
                 period = conn.execute("SELECT MIN(occurred_at) first,MAX(occurred_at) last FROM events WHERE organization_id=?", (row["id"],)).fetchone()
             if period["first"]:
                 result["data_period"] = {"start": period["first"][:10], "end": period["last"][:10]}
+        else:
+            result["user"] = {
+                "id": row["user_id"], "login": row["login"], "role": row["role"],
+                "must_change_password": bool(row["must_change_password"]),
+                "legacy_access": bool(dict(row).get("legacy_access", False)),
+            }
+            with db() as conn:
+                progress = _onboarding_payload(conn, row["id"])
+            result["onboarding"] = {"completed": progress["completed"], "step": progress["step"]}
         return result
 
     @app.get("/api/health")
@@ -370,34 +658,120 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @app.get("/api/auth/options")
     def auth_options():
-        return {"demo_enabled": _demo_enabled()}
+        return {"demo_enabled": _demo_enabled(), "registration_enabled": _registration_enabled()}
+
+    @app.post("/api/auth/register")
+    def register(payload: RegisterRequest, response: Response):
+        if not _registration_enabled():
+            raise HTTPException(403, "registration is disabled")
+        permit_auth_attempt(REGISTRATION_LIMITER, payload.account)
+        encoded_password = password_hash(payload.password)
+        organization_id = new_id()
+        user_id = new_id()
+        try:
+            with db() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT 1 FROM organizations WHERE account=? COLLATE NOCASE", (payload.account,)).fetchone():
+                    REGISTRATION_LIMITER.failed(payload.account)
+                    raise HTTPException(409, "account is already in use")
+                now = iso(utcnow())
+                conn.execute(
+                    "INSERT INTO organizations(id,name,account,password_hash,is_demo) VALUES(?,?,?,?,0)",
+                    (organization_id, payload.organization_name, payload.account, None),
+                )
+                conn.execute(
+                    """INSERT INTO users(id,organization_id,login,role,password_hash,status,created_at,must_change_password)
+                       VALUES(?,?,?,'admin',?,'active',?,0)""",
+                    (user_id, organization_id, payload.login, encoded_password, now),
+                )
+                recovery_code = issue_recovery_code(conn, user_id)
+                token = create_user_session(conn, user_id, organization_id)
+                row = {
+                    "id": organization_id, "name": payload.organization_name, "account": payload.account,
+                    "is_demo": 0, "user_id": user_id, "login": payload.login, "role": "admin",
+                    "must_change_password": 0,
+                }
+        except sqlite3.IntegrityError as exc:
+            REGISTRATION_LIMITER.failed(payload.account)
+            raise HTTPException(409, "account or login is already in use") from exc
+        REGISTRATION_LIMITER.succeeded(payload.account)
+        set_session_cookie(response, token, USER_SESSION_SECONDS)
+        return session_payload(row) | {"recovery_code": recovery_code}
 
     @app.post("/api/auth/login")
     def login(payload: LoginRequest, response: Response):
-        if not LOGIN_LIMITER.allowed(payload.account):
-            raise HTTPException(429, "too many login attempts; try again later")
+        login_name = payload.login or "legacy"
+        identifier = f"{payload.account}:{login_name}"
+        permit_auth_attempt(LOGIN_LIMITER, identifier)
+        legacy_only = " AND user.legacy_access=1" if payload.login is None else ""
         with db() as conn:
-            row = conn.execute("SELECT id,name,is_demo,password_hash FROM organizations WHERE account=? AND is_demo=0", (payload.account,)).fetchone()
+            row = conn.execute(
+                """SELECT o.id,o.name,o.account,o.is_demo,user.id user_id,user.login,user.role,
+                          user.password_hash,user.status,user.must_change_password,user.legacy_access
+                   FROM users user JOIN organizations o ON o.id=user.organization_id
+                   WHERE o.account=? AND o.is_demo=0 AND user.login=?""" + legacy_only,
+                (payload.account, login_name),
+            ).fetchone()
         # An unknown account gets the same expensive password operation as a known one.
         valid_password = password_matches(payload.password, row["password_hash"] if row else DUMMY_PASSWORD_HASH)
-        if not row or not valid_password:
-            LOGIN_LIMITER.failed(payload.account)
-            raise HTTPException(401, "invalid account or password")
-        LOGIN_LIMITER.succeeded(payload.account)
-        set_session(response, row["id"], is_demo=False)
-        return session_payload(row)
+        if not row or row["status"] != "active" or not valid_password:
+            LOGIN_LIMITER.failed(identifier)
+            raise HTTPException(401, "invalid account, login, or password")
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """SELECT o.id,o.name,o.account,o.is_demo,user.id user_id,user.login,user.role,
+                          user.password_hash,user.status,user.must_change_password,user.legacy_access
+                   FROM users user JOIN organizations o ON o.id=user.organization_id
+                   WHERE user.id=? AND user.status='active' AND o.is_demo=0""",
+                (row["user_id"],),
+            ).fetchone()
+            if not current or not password_matches(payload.password, current["password_hash"]):
+                LOGIN_LIMITER.failed(identifier)
+                raise HTTPException(401, "invalid account, login, or password")
+            if password_needs_upgrade(current["password_hash"]):
+                conn.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash(payload.password), current["user_id"]))
+                current = dict(current) | {"password_hash": None}
+            token = create_user_session(conn, current["user_id"], current["id"])
+        LOGIN_LIMITER.succeeded(identifier)
+        set_session_cookie(response, token, USER_SESSION_SECONDS)
+        return session_payload(current)
 
     @app.post("/api/auth/demo")
-    def demo_login(response: Response):
+    def demo_login(response: Response, itles_session: str | None = Cookie(default=None)):
         if not _demo_enabled():
             raise HTTPException(404, "demo is disabled")
+        if itles_session:
+            with db() as conn:
+                current = conn.execute(
+                    """SELECT o.id,o.name,o.account,o.is_demo,session.expires_at,
+                              NULL user_id,NULL login,NULL role,0 must_change_password
+                       FROM sessions session JOIN organizations o ON o.id=session.organization_id
+                       WHERE session.token_hash=? AND session.expires_at>? AND o.is_demo=1""",
+                    (hash_secret(itles_session), iso(utcnow())),
+                ).fetchone()
+            if current:
+                return session_payload(current)
         if not DEMO_LOGIN_LIMITER.allowed():
             raise HTTPException(429, "demo session limit reached; try again later")
         with db() as conn:
             conn.execute("BEGIN IMMEDIATE")
             org_id = seed_demo(conn)
-            row = conn.execute("SELECT id,name,is_demo FROM organizations WHERE id=?", (org_id,)).fetchone()
-        set_session(response, org_id, is_demo=True)
+            row = conn.execute("SELECT id,name,account,is_demo FROM organizations WHERE id=?", (org_id,)).fetchone()
+            now = utcnow()
+            conn.execute("DELETE FROM sessions WHERE expires_at<=?", (iso(now),))
+            at_capacity = conn.execute(
+                "SELECT COUNT(*) count FROM sessions WHERE organization_id=?", (org_id,)
+            ).fetchone()["count"] >= DEMO_SESSION_CAP
+            if not at_capacity:
+                token = secrets.token_urlsafe(32)
+                conn.execute(
+                    "INSERT INTO sessions(token_hash,organization_id,expires_at) VALUES(?,?,?)",
+                    (hash_secret(token), org_id, iso(now + timedelta(seconds=DEMO_SESSION_SECONDS))),
+                )
+        if at_capacity:
+            raise HTTPException(429, "demo session capacity reached; try again later")
+        set_session_cookie(response, token, DEMO_SESSION_SECONDS)
         return session_payload(row)
 
     @app.get("/api/auth/me")
@@ -409,8 +783,346 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if itles_session:
             with db() as conn:
                 conn.execute("DELETE FROM sessions WHERE token_hash=?", (hash_secret(itles_session),))
+                conn.execute("DELETE FROM user_sessions WHERE token_hash=?", (hash_secret(itles_session),))
         response.delete_cookie(SESSION_COOKIE, path="/")
         return {"ok": True}
+
+    @app.post("/api/auth/logout-all")
+    def logout_all(response: Response, itles_session: str | None = Cookie(default=None), session: dict = Depends(current_session)):
+        with db() as conn:
+            if session.get("user_id"):
+                conn.execute("DELETE FROM user_sessions WHERE user_id=?", (session["user_id"],))
+            elif itles_session:
+                conn.execute("DELETE FROM sessions WHERE token_hash=?", (hash_secret(itles_session),))
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return {"ok": True}
+
+    @app.post("/api/auth/password")
+    def change_password(payload: PasswordChangeRequest, response: Response, session: dict = Depends(current_session)):
+        if session.get("is_demo") or not session.get("user_id") or session.get("legacy_access"):
+            raise HTTPException(403, "a company account is required")
+        permit_auth_attempt(REAUTH_LIMITER, session["user_id"])
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute("SELECT password_hash,status FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            if not user or user["status"] != "active" or not password_matches(payload.current_password, user["password_hash"]):
+                REAUTH_LIMITER.failed(session["user_id"])
+                raise HTTPException(401, "current password is invalid")
+            conn.execute(
+                "UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?",
+                (password_hash(payload.new_password), session["user_id"]),
+            )
+            conn.execute("DELETE FROM user_sessions WHERE user_id=?", (session["user_id"],))
+        REAUTH_LIMITER.succeeded(session["user_id"])
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return {"ok": True}
+
+    @app.post("/api/auth/recovery-code")
+    def replace_recovery_code(payload: RecoveryCodeRequest, session: dict = Depends(require_sensitive_admin)):
+        permit_auth_attempt(REAUTH_LIMITER, session["user_id"])
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute("SELECT password_hash,status FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            if not user or user["status"] != "active" or not password_matches(payload.password, user["password_hash"]):
+                REAUTH_LIMITER.failed(session["user_id"])
+                raise HTTPException(401, "current password is invalid")
+            recovery_code = issue_recovery_code(conn, session["user_id"])
+        REAUTH_LIMITER.succeeded(session["user_id"])
+        return {"recovery_code": recovery_code}
+
+    @app.post("/api/auth/activate")
+    def activate(payload: ActivationRequest, response: Response):
+        identifier = f"{payload.account}:{payload.login}"
+        permit_auth_attempt(ACTIVATION_LIMITER, identifier)
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT o.id,o.name,o.account,o.is_demo,user.id user_id,user.login,user.role,user.status,
+                          user.must_change_password,code.code_hash,code.expires_at
+                   FROM users user JOIN organizations o ON o.id=user.organization_id
+                   LEFT JOIN activation_codes code ON code.user_id=user.id
+                   WHERE o.account=? AND o.is_demo=0 AND user.login=? AND user.legacy_access=0""",
+                (payload.account, payload.login),
+            ).fetchone()
+            valid = bool(row and row["status"] == "pending" and row["expires_at"] and row["expires_at"] > iso(utcnow())
+                         and secrets.compare_digest(hash_secret(payload.code), row["code_hash"]))
+            if not valid:
+                ACTIVATION_LIMITER.failed(identifier)
+                raise HTTPException(401, "invalid activation data")
+            conn.execute(
+                "UPDATE users SET password_hash=?,status='active',must_change_password=0 WHERE id=?",
+                (password_hash(payload.password), row["user_id"]),
+            )
+            conn.execute("DELETE FROM activation_codes WHERE user_id=?", (row["user_id"],))
+            conn.execute("DELETE FROM user_sessions WHERE user_id=?", (row["user_id"],))
+            token = create_user_session(conn, row["user_id"], row["id"])
+            recovery_code = issue_recovery_code(conn, row["user_id"]) if row["role"] == "admin" else None
+        ACTIVATION_LIMITER.succeeded(identifier)
+        set_session_cookie(response, token, USER_SESSION_SECONDS)
+        result = session_payload(dict(row) | {"must_change_password": 0})
+        return result | {"recovery_code": recovery_code} if recovery_code else result
+
+    @app.post("/api/auth/recover")
+    def recover(payload: RecoveryRequest, response: Response):
+        identifier = f"{payload.account}:{payload.login}"
+        permit_auth_attempt(RECOVERY_LIMITER, identifier)
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT o.id,o.name,o.account,o.is_demo,user.id user_id,user.login,user.role,user.status,
+                          user.must_change_password,code.code_hash,code.expires_at
+                   FROM users user JOIN organizations o ON o.id=user.organization_id
+                   LEFT JOIN recovery_codes code ON code.user_id=user.id
+                   WHERE o.account=? AND o.is_demo=0 AND user.login=? AND user.role='admin'""",
+                (payload.account, payload.login),
+            ).fetchone()
+            valid = bool(row and row["status"] == "active" and row["expires_at"] and row["expires_at"] > iso(utcnow())
+                         and secrets.compare_digest(hash_secret(payload.recovery_code), row["code_hash"]))
+            if not valid:
+                RECOVERY_LIMITER.failed(identifier)
+                raise HTTPException(401, "invalid recovery data")
+            conn.execute(
+                "UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?",
+                (password_hash(payload.password), row["user_id"]),
+            )
+            recovery_code = issue_recovery_code(conn, row["user_id"])
+            conn.execute("DELETE FROM user_sessions WHERE user_id=?", (row["user_id"],))
+            token = create_user_session(conn, row["user_id"], row["id"])
+        RECOVERY_LIMITER.succeeded(identifier)
+        set_session_cookie(response, token, USER_SESSION_SECONDS)
+        return session_payload(dict(row) | {"must_change_password": 0}) | {"recovery_code": recovery_code}
+
+    def own_machine(conn: sqlite3.Connection, organization_id: str, machine_id: str) -> sqlite3.Row:
+        machine = conn.execute(
+            "SELECT * FROM machines WHERE id=? AND organization_id=?", (machine_id, organization_id)
+        ).fetchone()
+        if not machine:
+            raise HTTPException(404, "machine not found")
+        return machine
+
+    def user_payload(user: sqlite3.Row) -> dict:
+        return {
+            "id": user["id"], "login": user["login"], "role": user["role"],
+            "status": user["status"], "created_at": user["created_at"],
+            "legacy_access": bool(dict(user).get("legacy_access", False)),
+        }
+
+    @app.get("/api/admin/onboarding")
+    def get_onboarding(session: dict = Depends(require_admin)):
+        with db() as conn:
+            return _onboarding_payload(conn, session["id"])
+
+    @app.patch("/api/admin/onboarding")
+    def save_onboarding(payload: OnboardingPatch, session: dict = Depends(require_sensitive_admin)):
+        if payload.step is None and payload.users_configured is None:
+            raise HTTPException(422, "at least one onboarding field is required")
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = _onboarding_payload(conn, session["id"])
+            existing = conn.execute(
+                "SELECT users_configured FROM onboarding WHERE organization_id=?", (session["id"],)
+            ).fetchone()
+            users_configured = bool(existing["users_configured"]) if existing else False
+            if payload.users_configured is not None:
+                users_configured = payload.users_configured
+            conn.execute(
+                """INSERT INTO onboarding(organization_id,step,users_configured,updated_at) VALUES(?,?,?,?)
+                   ON CONFLICT(organization_id) DO UPDATE SET step=excluded.step,
+                     users_configured=excluded.users_configured,updated_at=excluded.updated_at""",
+                (session["id"], payload.step or current["step"], int(users_configured), iso(utcnow())),
+            )
+            return _onboarding_payload(conn, session["id"])
+
+    @app.patch("/api/admin/company")
+    def update_company(payload: CompanyPatch, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            conn.execute("UPDATE organizations SET name=? WHERE id=? AND is_demo=0", (payload.name, session["id"]))
+            row = conn.execute("SELECT id,name,account FROM organizations WHERE id=?", (session["id"],)).fetchone()
+        return {"organization": dict(row)}
+
+    @app.get("/api/admin/users")
+    def list_users(session: dict = Depends(require_admin)):
+        with db() as conn:
+            rows = conn.execute(
+                """SELECT id,login,role,status,created_at,legacy_access FROM users WHERE organization_id=?
+                   ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END,login""",
+                (session["id"],),
+            ).fetchall()
+        return {"users": [user_payload(row) for row in rows]}
+
+    @app.post("/api/admin/users")
+    def create_user(payload: UserCreateRequest, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM users WHERE organization_id=? AND login=?", (session["id"], payload.login)
+            ).fetchone():
+                raise HTTPException(409, "login is already in use")
+            user_id = new_id()
+            created_at = iso(utcnow())
+            conn.execute(
+                """INSERT INTO users(id,organization_id,login,role,password_hash,status,created_at,must_change_password)
+                   VALUES(?,?,?,'user',NULL,'pending',?,0)""",
+                (user_id, session["id"], payload.login, created_at),
+            )
+            activation_code, expires_at = issue_activation_code(conn, user_id)
+            current = _onboarding_payload(conn, session["id"])
+            conn.execute(
+                """INSERT INTO onboarding(organization_id,step,users_configured,updated_at) VALUES(?,?,1,?)
+                   ON CONFLICT(organization_id) DO UPDATE SET users_configured=1,updated_at=excluded.updated_at""",
+                (session["id"], current["step"], iso(utcnow())),
+            )
+            user = conn.execute(
+                "SELECT id,login,role,status,created_at FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+        return {"user": user_payload(user), "activation_code": activation_code, "expires_at": expires_at}
+
+    @app.post("/api/admin/users/{user_id}/reissue")
+    def reissue_user(user_id: str, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute(
+                """SELECT id,login,role,status,created_at FROM users
+                   WHERE id=? AND organization_id=? AND role='user' AND legacy_access=0""",
+                (user_id, session["id"]),
+            ).fetchone()
+            if not user:
+                raise HTTPException(404, "user not found")
+            # Reissue deliberately requires a new personal password and makes
+            # any old activation material and sessions unusable.
+            conn.execute("UPDATE users SET status='pending',password_hash=NULL WHERE id=?", (user_id,))
+            conn.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+            activation_code, expires_at = issue_activation_code(conn, user_id)
+            user = conn.execute(
+                "SELECT id,login,role,status,created_at FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+        return {"user": user_payload(user), "activation_code": activation_code, "expires_at": expires_at}
+
+    @app.delete("/api/admin/users/{user_id}")
+    def revoke_user(user_id: str, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute(
+                "SELECT id,role FROM users WHERE id=? AND organization_id=?", (user_id, session["id"])
+            ).fetchone()
+            if not user:
+                raise HTTPException(404, "user not found")
+            if user["role"] != "user":
+                raise HTTPException(409, "the company administrator cannot be revoked here")
+            conn.execute("UPDATE users SET status='revoked',password_hash=NULL WHERE id=?", (user_id,))
+            conn.execute("DELETE FROM activation_codes WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM recovery_codes WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+        return {"ok": True}
+
+    @app.post("/api/admin/users/{user_id}/sessions/revoke")
+    def revoke_user_sessions(user_id: str, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            user = conn.execute(
+                "SELECT id FROM users WHERE id=? AND organization_id=? AND role='user'", (user_id, session["id"])
+            ).fetchone()
+            if not user:
+                raise HTTPException(404, "user not found")
+            conn.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+        return {"ok": True}
+
+    @app.post("/api/admin/machines")
+    def create_machine(payload: MachineCreateRequest, session: dict = Depends(require_sensitive_admin)):
+        machine_id = new_id()
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO machines(id,organization_id,name,model,head,computer) VALUES(?,?,?,?,?,?)",
+                (machine_id, session["id"], payload.name, payload.model, payload.head, payload.computer),
+            )
+            machine = own_machine(conn, session["id"], machine_id)
+        return {"machine": _machine_identity(machine)}
+
+    @app.get("/api/admin/machines/{machine_id}/source")
+    def get_machine_source(machine_id: str, session: dict = Depends(require_admin)):
+        with db() as conn:
+            conn.execute("BEGIN")
+            machine = own_machine(conn, session["id"], machine_id)
+            return _source_payload(conn, session["id"], machine)
+
+    @app.put("/api/admin/machines/{machine_id}/source")
+    def save_machine_source(machine_id: str, payload: SourcePatch, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            machine = own_machine(conn, session["id"], machine_id)
+            conn.execute(
+                """INSERT INTO machine_sources(machine_id,organization_id,model,computer,software_version,source_kind,
+                                                   export_description,permission_confirmed,reviewed_at,saved_at)
+                   VALUES(?,?,?,?,?,?,?,?,NULL,?)
+                   ON CONFLICT(machine_id) DO UPDATE SET model=excluded.model,computer=excluded.computer,
+                     software_version=excluded.software_version,source_kind=excluded.source_kind,
+                     export_description=excluded.export_description,permission_confirmed=excluded.permission_confirmed,
+                     reviewed_at=NULL,reviewed_event_count=0,saved_at=excluded.saved_at""",
+                (machine_id, session["id"], payload.model, payload.computer, payload.software_version,
+                 payload.source_kind, payload.export_description, int(payload.permission_confirmed), iso(utcnow())),
+            )
+            conn.execute(
+                "UPDATE machines SET model=?,computer=? WHERE id=? AND organization_id=?",
+                (payload.model, payload.computer, machine_id, session["id"]),
+            )
+            machine = own_machine(conn, session["id"], machine_id)
+            if payload.source_kind != "normalized_json" or not payload.permission_confirmed:
+                conn.execute("DELETE FROM device_tokens WHERE organization_id=? AND machine_id=?", (session["id"], machine_id))
+            return _source_payload(conn, session["id"], machine)
+
+    @app.post("/api/admin/machines/{machine_id}/tokens")
+    def issue_device_token(machine_id: str, payload: DeviceTokenRequest, session: dict = Depends(require_sensitive_admin)):
+        permit_auth_attempt(REAUTH_LIMITER, session["user_id"])
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            machine = own_machine(conn, session["id"], machine_id)
+            source = conn.execute(
+                "SELECT source_kind,permission_confirmed FROM machine_sources WHERE machine_id=? AND organization_id=?",
+                (machine_id, session["id"]),
+            ).fetchone()
+            if not source or source["source_kind"] != "normalized_json" or not source["permission_confirmed"]:
+                raise HTTPException(409, "configure normalized_json source and confirm permission before issuing a token")
+            user = conn.execute("SELECT password_hash,status FROM users WHERE id=?", (session["user_id"],)).fetchone()
+            if not user or user["status"] != "active" or not password_matches(payload.password, user["password_hash"]):
+                REAUTH_LIMITER.failed(session["user_id"])
+                raise HTTPException(401, "current password is invalid")
+            token = secrets.token_urlsafe(32)
+            created_at = iso(utcnow())
+            conn.execute("DELETE FROM device_tokens WHERE organization_id=? AND machine_id=?", (session["id"], machine_id))
+            conn.execute(
+                "INSERT INTO device_tokens(token_hash,organization_id,machine_id,created_at) VALUES(?,?,?,?)",
+                (hash_secret(token), session["id"], machine["id"], created_at),
+            )
+            conn.execute(
+                "INSERT INTO device_token_metadata(token_hash,id,created_at) VALUES(?,?,?)",
+                (hash_secret(token), new_id(), created_at),
+            )
+        REAUTH_LIMITER.succeeded(session["user_id"])
+        return {"token": token, "created_at": created_at}
+
+    @app.delete("/api/admin/machines/{machine_id}/tokens")
+    def revoke_device_tokens(machine_id: str, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            own_machine(conn, session["id"], machine_id)
+            conn.execute("DELETE FROM device_tokens WHERE organization_id=? AND machine_id=?", (session["id"], machine_id))
+        return {"ok": True}
+
+    @app.post("/api/admin/machines/{machine_id}/review")
+    def review_machine_source(machine_id: str, payload: SourceReviewRequest, session: dict = Depends(require_sensitive_admin)):
+        with db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            machine = own_machine(conn, session["id"], machine_id)
+            source = conn.execute(
+                "SELECT source_kind,permission_confirmed FROM machine_sources WHERE machine_id=? AND organization_id=?", (machine_id, session["id"])
+            ).fetchone()
+            accepted = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE organization_id=? AND machine_id=?", (session["id"], machine_id)
+            ).fetchone()[0]
+            if not source or source["source_kind"] != "normalized_json" or not source["permission_confirmed"] or not accepted:
+                raise HTTPException(409, "a configured source and accepted data are required before review")
+            if payload.message_count != accepted:
+                raise HTTPException(409, "new data arrived; refresh and compare before review")
+            conn.execute("UPDATE machine_sources SET reviewed_at=?,reviewed_event_count=? WHERE machine_id=?", (iso(utcnow()), accepted, machine_id))
+            return _source_payload(conn, session["id"], machine)
 
     @app.get("/api/machines")
     def machines(session: dict = Depends(current_session)):
@@ -464,6 +1176,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
         batch_hash, _ = canonical_hash(normalized)
         with db() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if not conn.execute(
+                "SELECT 1 FROM device_tokens WHERE token_hash=? AND organization_id=? AND machine_id=?",
+                (identity["token_hash"], identity["organization_id"], identity["machine_id"]),
+            ).fetchone():
+                raise HTTPException(401, "invalid device token")
             batch_row = conn.execute("SELECT payload_hash FROM ingest_batches WHERE organization_id=? AND machine_id=? AND batch_id=?", (identity["organization_id"], identity["machine_id"], str(batch.batch_id))).fetchone()
             if batch_row:
                 if batch_row["payload_hash"] != batch_hash:

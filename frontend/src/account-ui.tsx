@@ -76,6 +76,11 @@ export function Failure({ error }: { error: unknown }) {
             Адрес: {window.location.origin}
             {window.location.pathname}
             <br />
+            Контекст:{" "}
+            {window.self !== window.top
+              ? "встроенное окно"
+              : "отдельная вкладка"}
+            <br />
             Запрос API: {error.endpoint ?? "не зафиксирован"}
             <br />
             Ответ API: {error.status || "нет завершённого ответа (0)"}

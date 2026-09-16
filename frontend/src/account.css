@@ -60,6 +60,16 @@
   display: grid;
   gap: var(--space-2);
 }
+.entry-standalone-link {
+  display: inline-block;
+  text-decoration: none;
+}
+.entry-standalone-url {
+  overflow-wrap: anywhere;
+}
+.entry-standalone-url code {
+  user-select: all;
+}
 .entry-footer {
   border-top: 1px solid var(--line);
   padding-top: var(--space-6);

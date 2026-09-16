@@ -34,6 +34,7 @@ it("shows safe support diagnostics for the failing endpoint and frontend build",
   await userEvent.click(screen.getByText("Сведения для диагностики"));
   const diagnostics = screen.getByRole("alert").querySelector("details")!;
   expect(diagnostics).toHaveTextContent("Запрос API: /api/auth/demo");
+  expect(diagnostics).toHaveTextContent("Контекст: отдельная вкладка");
   expect(diagnostics).toHaveTextContent("Ответ API: 429");
   expect(diagnostics).toHaveTextContent(
     `Время ошибки (UTC): ${error.occurredAt}`,

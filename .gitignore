@@ -16,6 +16,7 @@ frontend/dist/
 !.hoplite/settings.json
 !.hoplite/setup.sh
 !.hoplite/run.sh
+!.hoplite/skills/
 dist/
 deliverables/
 *.tsbuildinfo

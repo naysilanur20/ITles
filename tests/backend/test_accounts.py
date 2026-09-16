@@ -2,7 +2,7 @@ import importlib
 import sqlite3
 from contextlib import closing
 from datetime import timedelta
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from backend.app import create_app
 from backend.cli import issue_admin_access
 from backend.db import connect, hash_secret, initialize, iso, password_hash, password_matches, utcnow
+from backend.seed import DEMO_ACCOUNT, DEMO_MACHINE_IDS, DEMO_ORG_ID, DEMO_VERSION
 
 
 PASSWORD = "synthetic-account-password"
@@ -90,6 +91,88 @@ def test_new_accounts_require_an_individual_login(accounts):
     admin.post("/api/auth/logout")
     result = admin.post("/api/auth/login", json={"account": "company-a", "password": PASSWORD})
     assert result.status_code == 401
+
+
+def test_registration_cannot_reserve_the_demo_account_before_first_demo_login(accounts, monkeypatch):
+    path, client = accounts
+    monkeypatch.setenv("ITLES_DEMO_ENABLED", "0")
+    visitor = client()
+    assert visitor.get("/api/health").status_code == 200
+    response = visitor.post("/api/auth/register", json={
+        "organization_name": "Not the demo", "account": DEMO_ACCOUNT,
+        "login": "admin", "password": PASSWORD,
+    })
+    assert response.status_code == 409
+    assert visitor.get("/api/auth/me").status_code == 401
+    with closing(connect(path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM organizations").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+    monkeypatch.setenv("ITLES_DEMO_ENABLED", "1")
+    demo = visitor.post("/api/auth/demo")
+    assert demo.status_code == 200
+    assert demo.json()["organization"]["id"] == DEMO_ORG_ID
+    assert demo.json()["demo"] is True
+
+
+@pytest.mark.parametrize("collision", ["account", "organization_id", "machine_id", "event_id"])
+def test_demo_seed_conflicts_return_json_without_changing_existing_company(accounts, collision):
+    path, client = accounts
+    admin = client()
+    registered = register(admin)
+    org_id = registered["organization"]["id"]
+    own_machine = machine(admin)
+    with closing(connect(path)) as conn:
+        if collision == "account":
+            conn.execute("UPDATE organizations SET account=? WHERE id=?", (DEMO_ACCOUNT, org_id))
+        elif collision == "organization_id":
+            conn.execute(
+                "INSERT INTO organizations VALUES(?, 'Existing company', 'existing-company', NULL, 0)",
+                (DEMO_ORG_ID,),
+            )
+        elif collision == "machine_id":
+            conn.execute(
+                "INSERT INTO machines VALUES(?, ?, 'Existing machine', NULL, NULL, NULL)",
+                (DEMO_MACHINE_IDS[0], org_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO events VALUES(?, ?, ?, ?, 'telemetry', 'existing-hash', '{}', ?)",
+                (reserved_demo_event_id(), org_id, own_machine, iso(utcnow()), iso(utcnow())),
+            )
+        conn.commit()
+        snapshot = "\n".join(conn.iterdump())
+    visitor = TestClient(create_app(path), raise_server_exceptions=False)
+    response = visitor.post("/api/auth/demo")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "demo temporarily unavailable", "code": "demo_unavailable"}
+    assert response.headers.get("x-request-id")
+    assert response.headers["cache-control"] == "no-store"
+    assert visitor.get("/api/auth/me").status_code == 401
+    assert admin.get("/api/auth/me").status_code == 200
+    assert any(row["id"] == own_machine for row in admin.get("/api/machines").json()["machines"])
+    with closing(connect(path)) as conn:
+        assert "\n".join(conn.iterdump()) == snapshot
+
+
+def reserved_demo_event_id():
+    return str(uuid5(NAMESPACE_URL, f"itles:{DEMO_VERSION}:{DEMO_MACHINE_IDS[0]}:telemetry:2026-09-14T06:00:00.000000Z"))
+
+
+def test_ingest_cannot_reserve_a_demo_event_id_before_first_demo_login(accounts):
+    _, client = accounts
+    admin = client()
+    register(admin)
+    machine_id = machine(admin)
+    source(admin, machine_id)
+    bearer = token(admin, machine_id)
+    batch = packet(machine_id)
+    batch["events"][0]["event_id"] = reserved_demo_event_id()
+    response = ingest(client(), bearer, batch)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "event_id is unavailable"}
+    assert admin.get(f"/api/admin/machines/{machine_id}/source").json()["connection"]["message_count"] == 0
+    assert client().post("/api/auth/demo").status_code == 200
+    assert admin.get("/api/auth/me").status_code == 200
 
 
 def test_migration_is_idempotent_and_preserves_legacy_data(accounts):

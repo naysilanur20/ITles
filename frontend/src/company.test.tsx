@@ -8,6 +8,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompanyPanel } from "./CompanyPanel";
+import { SecretNotice } from "./account-ui";
 
 const session = {
   organization: {
@@ -392,5 +393,251 @@ describe("company setup and access", () => {
     expect(
       screen.getByRole("heading", { name: "Харвестер 04: источник данных" }),
     ).toBeVisible();
+  });
+
+  it("allows an administrator to revoke migrated shared access without reissuing it", async () => {
+    let revoked = false;
+    mockSetup((url, options) => {
+      if (url === "/api/admin/users/legacy-a" && options?.method === "DELETE") {
+        revoked = true;
+        return json({ ok: true });
+      }
+      if (url === "/api/admin/users")
+        return json({
+          users: [
+            {
+              id: "legacy-a",
+              login: "legacy",
+              role: "user",
+              status: revoked ? "revoked" : "active",
+              legacy_access: true,
+              created_at: "2026-09-16T00:00:00Z",
+            },
+          ],
+        });
+    });
+    render(<CompanyPanel session={session} onSessionEnded={vi.fn()} />);
+    await screen.findByRole("button", {
+      name: "Настроить источник: Харвестер 04",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Пользователи" }));
+    expect(
+      screen.queryByRole("button", { name: "Выдать новый код" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Завершить сеансы" }),
+    ).toBeEnabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Отозвать доступ" }),
+    );
+    expect(revoked).toBe(false);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Подтвердить отзыв" }),
+    );
+    expect(await screen.findByText("Доступ отозван")).toBeVisible();
+    expect(revoked).toBe(true);
+  });
+
+  it("warns before reissuing access cancels the user's password and sessions", async () => {
+    const user = {
+      id: "viewer-a",
+      login: "viewer",
+      role: "user",
+      status: "active",
+      created_at: "2026-09-16T00:00:00Z",
+    };
+    let issued = false;
+    mockSetup((url) => {
+      if (url === "/api/admin/users") return json({ users: [user] });
+      if (url.endsWith("/reissue")) {
+        issued = true;
+        return json({
+          user,
+          activation_code: "synthetic-new-code",
+          expires_at: "2026-09-17T00:00:00Z",
+        });
+      }
+    });
+    render(<CompanyPanel session={session} onSessionEnded={vi.fn()} />);
+    await screen.findByRole("button", {
+      name: "Настроить источник: Харвестер 04",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Пользователи" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Выдать новый код" }),
+    );
+    expect(issued).toBe(false);
+    expect(
+      screen.getByText(/Прежний пароль, код активации и сеансы/),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Отмена" }));
+    expect(issued).toBe(false);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Выдать новый код" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Подтвердить замену кода" }),
+    );
+    expect(
+      await screen.findByLabelText("Код: показывается один раз"),
+    ).toHaveValue("synthetic-new-code");
+  });
+
+  it("preserves unsaved source fields when checking reception and reloads saved fields on a new visit", async () => {
+    let savedSource = { ...source };
+    mockSetup((url, options) => {
+      if (!url.endsWith("/source")) return;
+      if (options?.method === "PUT")
+        savedSource = JSON.parse(options.body as string);
+      return json({ machine, source: savedSource, connection, tokens: [] });
+    });
+    const view = render(
+      <CompanyPanel session={session} onSessionEnded={vi.fn()} />,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Настроить источник: Харвестер 04",
+      }),
+    );
+    fireEvent.change(await screen.findByLabelText("Бортовой компьютер"), {
+      target: { value: "Confirmed PC" },
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Проверить поступление" }),
+    );
+    expect(await screen.findByLabelText("Бортовой компьютер")).toHaveValue(
+      "Confirmed PC",
+    );
+    expect(savedSource.computer).toBe("Test PC");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Сохранить описание источника" }),
+    );
+    await screen.findByText(/Описание источника сохранено/);
+    view.unmount();
+    render(<CompanyPanel session={session} onSessionEnded={vi.fn()} />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Настроить источник: Харвестер 04",
+      }),
+    );
+    expect(await screen.findByLabelText("Бортовой компьютер")).toHaveValue(
+      "Confirmed PC",
+    );
+  });
+
+  it("clears comparison approval even when refreshing source facts fails", async () => {
+    let failRefresh = false;
+    mockSetup((url) => {
+      if (!url.endsWith("/source")) return;
+      return failRefresh
+        ? json({ detail: "unavailable" }, 503)
+        : json({
+            machine,
+            source: {
+              ...source,
+              source_kind: "normalized_json",
+              permission_confirmed: true,
+            },
+            connection: {
+              ...connection,
+              state: "review_required",
+              message_count: 1,
+            },
+            tokens: [],
+          });
+    });
+    render(<CompanyPanel session={session} onSessionEnded={vi.fn()} />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Настроить источник: Харвестер 04",
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Я сравнил время/ }),
+    );
+    failRefresh = true;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Проверить поступление" }),
+    );
+    await screen.findByRole("alert");
+    expect(
+      screen.getByRole("checkbox", { name: /Я сравнил время/ }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("button", { name: "Отметить сравнение с источником" }),
+    ).toBeDisabled();
+  });
+
+  it("requires saved source permission before offering device credentials", async () => {
+    let savedSource = { ...source, source_kind: "normalized_json" };
+    mockSetup((url, options) => {
+      if (url.endsWith("/source")) {
+        if (options?.method === "PUT")
+          savedSource = JSON.parse(options.body as string);
+        return json({ machine, source: savedSource, connection, tokens: [] });
+      }
+      if (url.endsWith("/tokens") && options?.method === "POST")
+        return json({ token: "synthetic-device-token" });
+    });
+    render(<CompanyPanel session={session} onSessionEnded={vi.fn()} />);
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Настроить источник: Харвестер 04",
+      }),
+    );
+    const permission = await screen.findByRole("checkbox", {
+      name: /Доступ к указанному источнику разрешён/,
+    });
+    expect(
+      screen.queryByRole("button", { name: "Выдать токен устройства" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(permission);
+    expect(
+      screen.queryByRole("button", { name: "Выдать токен устройства" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Сохранить описание источника" }),
+    );
+    fireEvent.change(
+      await screen.findByLabelText("Ваш пароль для выдачи токена"),
+      { target: { value: "synthetic-password" } },
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Выдать токен устройства" }),
+    );
+    expect(await screen.findByLabelText("Токен устройства")).toHaveValue(
+      "synthetic-device-token",
+    );
+    expect(screen.queryByText(/Активных токенов: 0/)).not.toBeInTheDocument();
+  });
+
+  it("requires saving each new one-time secret rather than inheriting the previous confirmation", async () => {
+    const onDone = vi.fn();
+    const view = render(
+      <SecretNotice
+        title="Сохраните код"
+        value="synthetic-first"
+        onDone={onDone}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: "Код сохранён в безопасном месте" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Сохранил, продолжить" }),
+    ).toBeEnabled();
+    view.rerender(
+      <SecretNotice
+        title="Сохраните код"
+        value="synthetic-replacement"
+        onDone={onDone}
+      />,
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "Код сохранён в безопасном месте" }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("button", { name: "Сохранил, продолжить" }),
+    ).toBeDisabled();
   });
 });

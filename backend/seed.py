@@ -14,6 +14,11 @@ DEMO_MACHINE_IDS = tuple(f"demo-v2-harvester-{index:02}" for index in range(1, 4
 DEMO_START = "2026-09-14"
 DEMO_END = "2026-09-15"
 
+
+class DemoSeedConflictError(ValueError):
+    """The fixed demo identity conflicts with existing data."""
+
+
 _COMPLETE_KEYS = (
     "fuel_level_pct", "fuel_rate_lph", "fuel_consumed_total_l", "engine_oil_pressure_kpa",
     "engine_oil_temperature_c", "engine_oil_level_pct", "hydraulic_oil_temperature_c",
@@ -52,8 +57,19 @@ _AUDIT = (
 )
 
 
+def _event_id(machine_id, occurred, kind):
+    return str(uuid5(NAMESPACE_URL, f"itles:{DEMO_VERSION}:{machine_id}:{kind}:{occurred}"))
+
+
+DEMO_EVENT_IDS = frozenset(
+    _event_id(DEMO_MACHINE_IDS[row[0]], row[1], kind)
+    for kind, rows in (("telemetry", _TELEMETRY), ("production", _PRODUCTION))
+    for row in rows
+)
+
+
 def _insert_event(conn, machine_id, occurred, kind, **values):
-    event_id = str(uuid5(NAMESPACE_URL, f"itles:{DEMO_VERSION}:{machine_id}:{kind}:{occurred}"))
+    event_id = _event_id(machine_id, occurred, kind)
     payload = {
         "fixture": {"version": DEMO_VERSION, "synthetic": True, "transport_verified": False},
         "event": {"event_id": event_id, "machine_id": machine_id, "occurred_at": occurred, "kind": kind, **values},
@@ -113,7 +129,7 @@ def seed_demo(conn):
         existing = conn.execute("SELECT id,is_demo FROM organizations WHERE account=?", (DEMO_ACCOUNT,)).fetchone()
         if existing:
             if existing["id"] != DEMO_ORG_ID or not existing["is_demo"]:
-                raise ValueError("demo-v2 account is reserved for the synthetic scenario")
+                raise DemoSeedConflictError("demo-v2 account is reserved for the synthetic scenario")
         else:
             _insert_scenario(conn)
     except Exception:

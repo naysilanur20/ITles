@@ -26,7 +26,7 @@ from .schemas import (
     MachineCreateRequest, METRICS, OnboardingPatch, PasswordChangeRequest,
     RecoveryCodeRequest, RecoveryRequest, RegisterRequest, SourcePatch, SourceReviewRequest, UserCreateRequest,
 )
-from .seed import seed_demo
+from .seed import DEMO_ACCOUNT, DEMO_EVENT_IDS, DemoSeedConflictError, seed_demo
 
 SESSION_COOKIE = "itles_session"
 FRESH_TTL = timedelta(hours=2)
@@ -665,6 +665,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if not _registration_enabled():
             raise HTTPException(403, "registration is disabled")
         permit_auth_attempt(REGISTRATION_LIMITER, payload.account)
+        if payload.account == DEMO_ACCOUNT:
+            REGISTRATION_LIMITER.failed(payload.account)
+            raise HTTPException(409, "account is already in use")
         encoded_password = password_hash(payload.password)
         organization_id = new_id()
         user_id = new_id()
@@ -756,7 +759,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
             raise HTTPException(429, "demo session limit reached; try again later")
         with db() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            org_id = seed_demo(conn)
+            try:
+                org_id = seed_demo(conn)
+            except (DemoSeedConflictError, sqlite3.IntegrityError):
+                return JSONResponse(
+                    {"detail": "demo temporarily unavailable", "code": "demo_unavailable"}, status_code=503,
+                )
             row = conn.execute("SELECT id,name,account,is_demo FROM organizations WHERE id=?", (org_id,)).fetchone()
             now = utcnow()
             conn.execute("DELETE FROM sessions WHERE expires_at<=?", (iso(now),))
@@ -1191,7 +1199,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
             event_hashes = [(event, *canonical_hash(event.model_dump(mode="json"))) for event in batch.events]
             for event, digest, _ in event_hashes:
                 prior = conn.execute("SELECT organization_id,payload_hash FROM events WHERE event_id=?", (str(event.event_id),)).fetchone()
-                if prior and prior["organization_id"] != identity["organization_id"]:
+                # Fixture IDs stay reserved before the first demo admission too.
+                if str(event.event_id) in DEMO_EVENT_IDS or (prior and prior["organization_id"] != identity["organization_id"]):
                     audit(conn, identity["organization_id"], identity["machine_id"], "rejected", "event_id_unavailable")
                     return JSONResponse({"detail": "event_id is unavailable"}, status_code=409)
                 if prior and prior["payload_hash"] != digest:

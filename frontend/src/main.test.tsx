@@ -103,7 +103,7 @@ describe("production map frontend", () => {
     render(<App />);
     const user = userEvent.setup();
     await screen.findByRole("heading", {
-      name: /Сообщения, координаты.*выработка вашего парка/i,
+      name: "Мониторинг харвестеров",
     });
     expect(
       screen.getByRole("button", { name: "Я администратор компании" }),
@@ -151,7 +151,7 @@ describe("production map frontend", () => {
     const user = userEvent.setup();
     expect(
       await screen.findByRole("heading", {
-        name: /Сообщения, координаты.*выработка вашего парка/i,
+        name: "Мониторинг харвестеров",
       }),
     ).toBeVisible();
     expect(
@@ -210,7 +210,7 @@ describe("production map frontend", () => {
     render(<App />);
     const user = userEvent.setup();
     await screen.findByRole("heading", {
-      name: /Сообщения, координаты.*выработка вашего парка/i,
+      name: "Мониторинг харвестеров",
     });
     await user.click(screen.getByRole("button", { name: "Войти в компанию" }));
     await screen.findByRole("heading", { name: "Войти в компанию" });
@@ -770,7 +770,7 @@ describe("production map frontend", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps a stale GPS observation in the attention list despite fresh connection", async () => {
+  it("keeps stale GPS in the attention filter despite fresh connection", async () => {
     const onSelect = vi.fn();
     render(
       <Overview
@@ -793,6 +793,10 @@ describe("production map frontend", () => {
       />,
     );
 
+    await userEvent.selectOptions(
+      screen.getByLabelText("Состояние данных"),
+      "attention",
+    );
     const attention = screen.getByRole("button", {
       name: /Харвестер 01.*Координаты устарели/i,
     });
@@ -895,6 +899,69 @@ describe("production map frontend", () => {
     expect(screen.getByRole("row", { name: /Альфа/ })).toBeVisible();
     expect(screen.queryByRole("row", { name: /Бета/ })).not.toBeInTheDocument();
     expect(screen.getByText("Показано 1 из 2")).toBeVisible();
+  });
+
+  it("combines state and text filters and resets an empty result without claiming an empty company", async () => {
+    render(
+      <Overview
+        machines={[
+          {
+            ...machines.machines[0],
+            id: "missing",
+            name: "Без сообщений",
+            last_seen: null,
+            position: null,
+            connection_status: "missing",
+          },
+          {
+            ...machines.machines[0],
+            id: "fresh",
+            name: "Свежая",
+            last_seen: "2026-01-14T08:30:00Z",
+            connection_status: "fresh",
+            position: {
+              latitude: 61,
+              longitude: 73,
+              observed_at: "2026-01-14T08:30:00Z",
+              status: "fresh",
+            },
+          },
+        ]}
+        fleet={fleet}
+        onSelect={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    );
+    const user = userEvent.setup();
+    await user.selectOptions(
+      screen.getByLabelText("Состояние данных"),
+      "missing",
+    );
+    expect(screen.getByRole("row", { name: /Без сообщений/ })).toBeVisible();
+    expect(
+      screen.queryByRole("row", { name: /Свежая/ }),
+    ).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Поиск машин"), " свежая ");
+    expect(screen.getByText(/Нет машин по выбранным условиям/)).toBeVisible();
+    expect(
+      screen.queryByText(/В компании пока нет машин/),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Сбросить поиск и фильтр" }),
+    );
+    expect(screen.getByLabelText("Поиск машин")).toHaveValue("");
+    expect(screen.getByLabelText("Состояние данных")).toHaveValue("all");
+    expect(screen.getByText("Показано 2 из 2")).toBeVisible();
+    await user.selectOptions(
+      screen.getByLabelText("Состояние данных"),
+      "attention",
+    );
+    expect(
+      screen.getByRole("row", { name: /Без сообщений/ }),
+    ).toHaveTextContent("События ещё не поступали");
+    expect(
+      screen.queryByRole("row", { name: /Свежая/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps packet receipt, event, and coordinate times in separate columns when the API provides them", () => {

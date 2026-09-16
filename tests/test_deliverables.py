@@ -98,6 +98,9 @@ def test_source_archive_contains_reviewable_sources_but_not_secrets_or_local_sta
 
     assert "itles/edge/outbox.py" in names
     assert "itles/scripts/build_deliverables.py" in names
+    assert "itles/HANDOFF.md" in names
+    assert "itles/frontend/playwright.config.ts" in names
+    assert "itles/frontend/e2e/server.py" in names
     assert "itles/research/hardware.json" in names
     assert {"itles/DESIGN.md", "itles/docs/demo-scenario.md", "itles/frontend/src/api.ts",
             "itles/frontend/src/assets/fonts/GolosText.ttf", "itles/frontend/src/assets/fonts/GolosText-OFL.txt",

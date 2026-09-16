@@ -36,7 +36,6 @@ import {
   LayoutDashboard,
   LocateFixed,
   Search,
-  Clock3,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import "./styles.css";
@@ -250,11 +249,6 @@ function volume(value: string) {
 function recordCount(count: number) {
   const form = new Intl.PluralRules("ru").select(count);
   return `${count} ${form === "one" ? "запись" : form === "few" ? "записи" : "записей"}`;
-}
-
-function machineCount(count: number) {
-  const form = new Intl.PluralRules("ru").select(count);
-  return `${count} ${form === "one" ? "машина" : form === "few" ? "машины" : "машин"}`;
 }
 
 function StatusPill({ status }: { status: Status }) {
@@ -885,7 +879,13 @@ export function Workspace({
               session={session}
               onSessionEnded={onLogout}
               onChanged={() => void load(true)}
-              onOpenMachine={select}
+              onOpenMachine={(id) => {
+                selectedRef.current = id;
+                setSelected(id);
+                setOpen(false);
+                setView("map");
+                void load(true);
+              }}
             />
           </div>
         ) : loading || refreshing ? (
@@ -977,18 +977,25 @@ export function Overview({
 }) {
   const [search, setSearch] = useState("");
   const [ascending, setAscending] = useState(true);
+  const [dataFilter, setDataFilter] = useState("all");
+  const needsAttention = (machine: Machine) =>
+    machine.connection_status !== "fresh" ||
+    machine.position?.status !== "fresh";
   const filtered = machines
     .filter((machine) =>
       `${machine.name} ${machine.model ?? ""}`
         .toLocaleLowerCase("ru")
-        .includes(search.toLocaleLowerCase("ru")),
+        .includes(search.trim().toLocaleLowerCase("ru")),
+    )
+    .filter((machine) =>
+      dataFilter === "attention"
+        ? needsAttention(machine)
+        : dataFilter === "missing"
+          ? !observedAt(machine)
+          : true,
     )
     .sort((a, b) => a.name.localeCompare(b.name, "ru") * (ascending ? 1 : -1));
-  const attention = machines.filter(
-    (machine) =>
-      machine.connection_status !== "fresh" ||
-      machine.position?.status !== "fresh",
-  );
+  const attention = machines.filter(needsAttention);
   const hasFuel = machines.some((machine) =>
     machine.metrics.some(
       (metric) => metric.key === "fuel_level_pct" && metric.value !== null,
@@ -1016,17 +1023,13 @@ export function Overview({
       >
         <div className="section-title fleet-register__head">
           <div>
-            <p className="eyebrow">Мониторинг техники</p>
             <h2 id="fleet-title">Машины</h2>
             <p className="section-description">
-              Время событий и координат не ограничено периодом журнала.
-              Выработка ниже относится к выбранным датам UTC.
+              Последние сообщения и координаты — за всё время. Объём — за
+              выбранный период.
             </p>
           </div>
           <div className="fleet-tools">
-            <span className="fleet-count">
-              {fleet ? machineCount(machines.length) : "Загрузка журнала"}
-            </span>
             <label className="search-field">
               <Search size={17} aria-hidden="true" />
               <input
@@ -1037,13 +1040,30 @@ export function Overview({
                 onChange={(event) => setSearch(event.target.value)}
               />
             </label>
+            <label className="data-filter">
+              <span>Состояние данных</span>
+              <select
+                value={dataFilter}
+                onChange={(event) => setDataFilter(event.target.value)}
+              >
+                <option value="all">Все машины</option>
+                <option value="attention">
+                  Требуют внимания ({attention.length})
+                </option>
+                <option value="missing">События не поступали</option>
+              </select>
+            </label>
           </div>
         </div>
-        <p className="table-note">
-          {hasReceivedTimes
-            ? "Время приёма пакета и время события показаны отдельно."
-            : "API пока передаёт время последнего события, но не время приёма пакета."}
-        </p>
+        <details className="registry-help">
+          <summary>Как читать время и состояния</summary>
+          <p>
+            Последний пакет — время приёма сервером; событие и координаты —
+            время наблюдения источником. Все даты в UTC. Свежесть данных не
+            подтверждает исправность машины. Порог устаревания — 2 часа, это не
+            норма датчика.
+          </p>
+        </details>
         {!fleet ? (
           <Empty>
             <p>
@@ -1053,145 +1073,165 @@ export function Overview({
             </p>
           </Empty>
         ) : filtered.length ? (
-          <div
-            className="table-scroll"
-            tabIndex={0}
-            role="region"
-            aria-label="Таблица машин"
-          >
-            <table>
-              <caption className="sr-only">
-                Машины, время последних событий, координат и объём из журнала
-              </caption>
-              <thead>
-                <tr>
-                  <th
-                    scope="col"
-                    aria-sort={ascending ? "ascending" : "descending"}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setAscending(!ascending)}
-                      aria-label={
-                        ascending
-                          ? "Сортировать машины от Я до А"
-                          : "Сортировать машины от А до Я"
-                      }
+          <>
+            <p className="table-scroll-hint">
+              Таблицу можно прокрутить вправо, чтобы увидеть все показатели.
+            </p>
+            <div
+              className="table-scroll"
+              tabIndex={0}
+              role="region"
+              aria-label="Таблица машин"
+            >
+              <table>
+                <caption className="sr-only">
+                  Машины, время последних событий, координат и объём из журнала
+                </caption>
+                <thead>
+                  <tr>
+                    <th
+                      scope="col"
+                      aria-sort={ascending ? "ascending" : "descending"}
                     >
-                      Машина <ArrowUpDown size={14} aria-hidden="true" />
-                    </button>
-                  </th>
-                  <th scope="col">
-                    {hasReceivedTimes ? "Последний пакет" : "Последнее событие"}
-                  </th>
-                  {hasReceivedTimes && <th scope="col">Время события</th>}
-                  <th scope="col">Координаты</th>
-                  {hasFuel && <th scope="col">Топливо</th>}
-                  <th scope="col">Объём за период</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((machine) => {
-                  const fuel = machine.metrics.find(
-                    (metric) => metric.key === "fuel_level_pct",
-                  );
-                  const totals = fleet?.machines.find(
-                    (entry) => entry.id === machine.id,
-                  )?.totals;
-                  const packetTime = receivedAt(machine);
-                  const eventTime = observedAt(machine);
-                  return (
-                    <tr key={machine.id}>
-                      <th scope="row">
-                        <button
-                          type="button"
-                          className="machine-link"
-                          onClick={() => onSelect(machine.id)}
-                        >
-                          <span>
-                            <b>{machine.name}</b>
-                            <small>
-                              {machine.model || "Модель не указана"}
-                            </small>
-                          </span>
-                          <ArrowUpRight size={16} />
-                        </button>
-                      </th>
-                      <td>
-                        <span>
-                          {displayDate(
-                            hasReceivedTimes ? packetTime : eventTime,
-                          )}
-                        </span>
-                        {!hasReceivedTimes && eventTime && (
-                          <StatusPill status={machine.connection_status} />
-                        )}
-                      </td>
-                      {hasReceivedTimes && (
+                      <button
+                        type="button"
+                        onClick={() => setAscending(!ascending)}
+                        aria-label={
+                          ascending
+                            ? "Сортировать машины от Я до А"
+                            : "Сортировать машины от А до Я"
+                        }
+                      >
+                        Машина <ArrowUpDown size={14} aria-hidden="true" />
+                      </button>
+                    </th>
+                    <th scope="col">
+                      {hasReceivedTimes
+                        ? "Последний пакет"
+                        : "Последнее событие"}
+                    </th>
+                    {hasReceivedTimes && <th scope="col">Время события</th>}
+                    <th scope="col">Координаты</th>
+                    {hasFuel && <th scope="col">Топливо</th>}
+                    <th scope="col">Объём за период</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((machine) => {
+                    const fuel = machine.metrics.find(
+                      (metric) => metric.key === "fuel_level_pct",
+                    );
+                    const totals = fleet?.machines.find(
+                      (entry) => entry.id === machine.id,
+                    )?.totals;
+                    const packetTime = receivedAt(machine);
+                    const eventTime = observedAt(machine);
+                    return (
+                      <tr key={machine.id}>
+                        <th scope="row">
+                          <button
+                            type="button"
+                            className="machine-link"
+                            onClick={() => onSelect(machine.id)}
+                          >
+                            <span>
+                              <b>{machine.name}</b>
+                              <small>
+                                {machine.model || "Модель не указана"}
+                              </small>
+                              {dataFilter === "attention" && (
+                                <small className="attention-reason">
+                                  {attentionMessage(machine)}
+                                </small>
+                              )}
+                            </span>
+                            <ArrowUpRight size={16} />
+                          </button>
+                        </th>
                         <td>
-                          <span>{displayDate(eventTime)}</span>
-                          {eventTime && (
+                          <span>
+                            {displayDate(
+                              hasReceivedTimes ? packetTime : eventTime,
+                            )}
+                          </span>
+                          {!hasReceivedTimes && eventTime && (
                             <StatusPill status={machine.connection_status} />
                           )}
                         </td>
-                      )}
-                      <td>
-                        {machine.position ? (
-                          <>
-                            <span>
-                              {displayDate(machine.position.observed_at)}
-                            </span>
-                            <StatusPill status={machine.position.status} />
-                          </>
-                        ) : (
-                          <span className="muted">Координаты не поступали</span>
+                        {hasReceivedTimes && (
+                          <td>
+                            <span>{displayDate(eventTime)}</span>
+                            {eventTime && (
+                              <StatusPill status={machine.connection_status} />
+                            )}
+                          </td>
                         )}
-                      </td>
-                      {hasFuel && (
                         <td>
-                          {fuel?.value != null ? (
+                          {machine.position ? (
                             <>
-                              <b>
-                                {metricValue(fuel)} {fuel.unit}
-                              </b>
-                              <StatusPill status={fuel.status} />
+                              <span>
+                                {displayDate(machine.position.observed_at)}
+                              </span>
+                              <StatusPill status={machine.position.status} />
                             </>
                           ) : (
-                            <span className="muted">Нет данных</span>
+                            <span className="muted">
+                              Координаты не поступали
+                            </span>
                           )}
                         </td>
-                      )}
-                      <td>
-                        {totals?.length ? (
-                          totals.map((total) => (
-                            <span className="table-volume" key={total.basis}>
-                              <b>{volume(total.volume_m3)} м³</b>{" "}
-                              {basisName(total.basis)}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="muted">
-                            {fleet ? "Нет записей" : "Не получен"}
-                          </span>
+                        {hasFuel && (
+                          <td>
+                            {fuel?.value != null ? (
+                              <>
+                                <b>
+                                  {metricValue(fuel)} {fuel.unit}
+                                </b>
+                                <StatusPill status={fuel.status} />
+                              </>
+                            ) : (
+                              <span className="muted">Нет данных</span>
+                            )}
+                          </td>
                         )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        <td>
+                          {totals?.length ? (
+                            totals.map((total) => (
+                              <span className="table-volume" key={total.basis}>
+                                <b>{volume(total.volume_m3)} м³</b>{" "}
+                                {basisName(total.basis)}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="muted">
+                              {fleet ? "Нет записей" : "Не получен"}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         ) : (
           <Empty>
-            {search ? (
+            {search || dataFilter !== "all" ? (
               <>
-                <p>Машины не найдены. Измените запрос или очистите поиск.</p>
+                <p>
+                  Нет машин по выбранным условиям. Измените поиск или состояние
+                  данных.
+                </p>
                 <button
                   type="button"
                   className="text-button"
-                  onClick={() => setSearch("")}
+                  onClick={() => {
+                    setSearch("");
+                    setDataFilter("all");
+                  }}
                 >
-                  Очистить поиск
+                  Сбросить поиск и фильтр
                 </button>
               </>
             ) : onOpenCompany ? (
@@ -1219,9 +1259,16 @@ export function Overview({
         )}
         {fleet && (
           <div className="table-footer">
-            <span>
+            <span role="status">
               Показано {filtered.length} из {machines.length}
             </span>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => onNavigate("quality")}
+            >
+              Журнал приёма
+            </button>
             <button
               className="text-button"
               type="button"
@@ -1234,44 +1281,6 @@ export function Overview({
         )}
       </section>
       <div className="overview-support">
-        <section className="attention-panel" aria-labelledby="attention-title">
-          <div className="section-heading">
-            <div>
-              <h2 id="attention-title">Нужно проверить</h2>
-              <p>Свежесть относится к данным, а не к исправности машины.</p>
-            </div>
-            <Clock3 size={18} aria-hidden="true" />
-          </div>
-          {attention.length ? (
-            attention.map((machine) => (
-              <button
-                className="attention-row"
-                type="button"
-                onClick={() => onSelect(machine.id)}
-                key={machine.id}
-              >
-                <span>
-                  <b>{machine.name}</b>
-                  <small>{attentionMessage(machine)}</small>
-                </span>
-                <ArrowUpRight size={17} aria-hidden="true" />
-              </button>
-            ))
-          ) : (
-            <p className="attention-empty">
-              {machines.length
-                ? "Во всех строках есть свежие события и координаты. Исправность машины этим не подтверждается."
-                : "Когда машины появятся, здесь будут показаны устаревшие и неполные данные."}
-            </p>
-          )}
-          <button
-            className="text-button"
-            type="button"
-            onClick={() => onNavigate("quality")}
-          >
-            Открыть журнал приёма <ArrowUpRight size={17} aria-hidden="true" />
-          </button>
-        </section>
         <section
           className="production-summary"
           aria-labelledby="production-summary-title"

@@ -6,7 +6,7 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
 } from "react";
-import { ApiError, errorMessage } from "./api";
+import { ApiError, errorMessage, FRONTEND_BUILD_ID } from "./api";
 
 export function Field({
   label,
@@ -76,7 +76,16 @@ export function Failure({ error }: { error: unknown }) {
             Адрес: {window.location.origin}
             {window.location.pathname}
             <br />
-            Ответ API: {error.status || "нет соединения"}
+            Запрос API: {error.endpoint ?? "не зафиксирован"}
+            <br />
+            Ответ API: {error.status || "нет завершённого ответа (0)"}
+            <br />
+            Время ошибки (UTC): {error.occurredAt}
+            <br />
+            Сборка интерфейса: {FRONTEND_BUILD_ID}
+            {FRONTEND_BUILD_ID === "unknown" && " (не определена при сборке)"}
+            <br />
+            Технический код: {error.code ?? "не зафиксирован"}
             {error.requestId && (
               <>
                 <br />
@@ -113,6 +122,9 @@ export function SecretNotice({
   const [copyError, setCopyError] = useState("");
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
+    setSaved(false);
+    setCopied(false);
+    setCopyError("");
     heading.current?.focus();
   }, [value]);
   async function copy() {

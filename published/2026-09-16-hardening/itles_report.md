@@ -1216,13 +1216,16 @@ API, SQLite, карта парка, карточки машин и реестр 
 
 ```sh
 bash .hoplite/setup.sh
-bash .hoplite/run.sh
+ITLES_COOKIE_SECURE=0 bash .hoplite/run.sh
 ```
 
 Откройте `http://localhost:3000` и выберите «Посмотреть демо».
-Этот run-скрипт предназначен **только для Preview**: он по умолчанию включает учебные
-данные и допускает cookie по локальному HTTP. Настройки приложения по умолчанию
-обратные: demo выключен, cookie Secure включён. База создаётся в `.local/`;
+Команда выше предназначена **только для частного локального HTTP-стенда**:
+исключение `ITLES_COOKIE_SECURE=0` задано явно. Сам `.hoplite/run.sh` по умолчанию
+включает учебные данные и защищённые Secure-cookie для HTTPS Preview.
+В публичном Preview запускайте его без этого исключения, открывайте отдельную
+вкладку и нажимайте «Посмотреть демо» — ключ не нужен. Настройки приложения
+без run-скрипта: demo выключен, Secure-cookie включены. База создаётся в `.local/`;
 она, ключи и окружение не входят в Git или архив исходников.
 
 ```sh
@@ -1348,9 +1351,9 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
 
 ```json
 {
-  "verified_at_utc": "2026-09-16T13:16:54.458467+00:00",
-  "source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee",
-  "source_fingerprint": "71cc1f7c90ba1acf15174875fc294aef700a902cef389c2543b5a7ecce736579",
+  "verified_at_utc": "2026-09-16T13:24:59.742143+00:00",
+  "source_commit": "6236586f428b52e9dd088427d399c14da8e53c62",
+  "source_fingerprint": "faaa26f37abade5d93955e309c88eb50cf18287f5c25482366481e8bbb79d69e",
   "version_scope": "Source commit identifies implementation, tests and instructions. Evidence-only publication commit follows; verification-results.json is excluded from the SHA-256 fingerprint.",
   "evidence_level": "automated_and_synthetic_browser_not_real_machine",
   "baseline_commit": "4a236b2a158beb09d21387eb9dc7864a3c2d8230",
@@ -1366,6 +1369,7 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "verified_source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee"
   },
   "python": {
+    "verified_source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee",
     "command": ".venv/bin/python -m pytest -q",
     "passed": 146,
     "failed": 0,
@@ -1376,11 +1380,13 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     ]
   },
   "frontend": {
+    "verified_source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee",
     "command": "npm --prefix frontend test",
     "passed": 67,
     "failed": 0
   },
   "build": {
+    "verified_source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee",
     "command": "npm --prefix frontend run build",
     "result": "passed",
     "vite_version": "6.4.3",
@@ -1398,6 +1404,7 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "scope": "synthetic ASGI in-process; not physical network or machinery"
   },
   "browser_e2e": {
+    "verified_source_commit": "5f8ef526de1fc0be691dc44ad5a5f974f8f856ee",
     "command": "npm --prefix frontend run test:e2e",
     "passed": 9,
     "failed": 0,
@@ -1480,7 +1487,7 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "verification": "generator and archive regressions; report source fingerprint compared, not inferred from a historical run"
   },
   "github_ci": {
-    "result": "At source head 5f8ef52 both container jobs and push synthetic job passed; pull_request synthetic job was still running at the observed snapshot. Publication head needs live checks. CI does not validate the authenticated external Preview.",
+    "result": "All four CI checks passed on 0054a93f7beb8a132292fb0e26aedb41d9a5f80b; no reviews or unresolved threads at the final-pass snapshot. The documentation correction and regenerated publication require their own live checks. CI does not validate authenticated external Preview.",
     "workflow": ".github/workflows/verify.yml",
     "previous_verified_run": "https://github.com/naysilanur20/ITles/actions/runs/35093423652",
     "instruction": "Read live checks for the published head, not the previous result."
@@ -1505,6 +1512,13 @@ ITLES_DB_PATH=/srv/itles-data/itles.sqlite3 ITLES_DEMO_ENABLED=0 ITLES_COOKIE_SE
     "local_checks": "146 Python, 67 frontend, 9 isolated browser scenarios passed; TypeScript and production build passed",
     "configuration_impact": "Preview run defaults ITLES_COOKIE_SECURE to 1 for HTTPS; local HTTP tests explicitly use 0. No new required variables, secrets, schema, IAM, DNS, Terraform, cron, OAuth, webhook or feature-flag provisioning. No project script overrides retained.",
     "before_merge": "Restore managed Preview and verify user-facing HTTPS standalone demo admission, /me, reload and logout. Do not merge on isolated CI alone."
+  },
+  "final_release_audit": {
+    "source_commit": "6236586f428b52e9dd088427d399c14da8e53c62",
+    "change": "Documentation only: README local HTTP command explicitly sets Secure=0; README and HANDOFF now agree that public HTTPS Preview defaults to Secure=1. No executable code changed after 5f8ef52.",
+    "audit": "Full base/head configuration and release audit completed; no further migration, secret, infrastructure or external-service provisioning required. Managed Preview lifecycle and external acceptance remain unresolved.",
+    "validation": "Source fingerprint, six publication hashes, verification copy and both source ZIPs checked byte-for-byte; focused delivery/deployment tests rerun for this publication.",
+    "preview_recheck": "preview_start still returns old terminated process; sandbox_ports confirms no listener on 3000. No successful restart or external session validation claimed."
   },
   "ci_logout_regression": {
     "verified_source_commit": "490cf4f975396d8025babb50de1e8a70318e00fb",

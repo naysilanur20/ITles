@@ -6,6 +6,7 @@ deployment/**
 !deployment/compose.yaml
 !README.md
 !DESIGN.md
+!HANDOFF.md
 !requirements.txt
 !requirements.lock
 !pyproject.toml
@@ -31,6 +32,9 @@ frontend/**
 !frontend/tsconfig*.json
 !frontend/vite.config.ts
 !frontend/vitest.config.ts
+!frontend/playwright.config.ts
+!frontend/e2e/
+!frontend/e2e/**
 !frontend/src/
 !frontend/src/**
 !frontend/public/

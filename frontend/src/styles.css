@@ -7,9 +7,9 @@
 }
 
 :root {
-  --paper: #f6f3ed;
-  --surface: #fffefa;
-  --surface-muted: #f0eee8;
+  --paper: #f3f5f4;
+  --surface: #ffffff;
+  --surface-muted: #edf1ef;
   --ink: #26312d;
   --muted: #5a6761;
   --line: #d2d7cf;
@@ -33,8 +33,8 @@
   --error-paper: #fff0ed;
   --error-overlay: rgb(163 56 49 / 12%);
   --line-action: #bdd1c2;
-  --surface-hover: #fbfaf6;
-  --surface-overlay: rgb(255 254 250 / 94%);
+  --surface-hover: #f6f8f7;
+  --surface-overlay: rgb(255 255 255 / 94%);
   --scrim: rgb(38 49 45 / 45%);
   --backdrop: rgb(38 49 45 / 36%);
   --modal-shadow: 0 20px 60px rgb(38 49 45 / 28%);
@@ -692,12 +692,6 @@ small {
   min-width: min(100%, 360px);
 }
 
-.fleet-count {
-  color: var(--muted);
-  font-size: 13px;
-  white-space: nowrap;
-}
-
 .search-field {
   display: flex;
   align-items: center;
@@ -735,6 +729,63 @@ small {
   line-height: 1.5;
 }
 
+.fleet-register__head {
+  gap: var(--space-4);
+}
+
+.fleet-register__head .section-description {
+  max-width: 48ch;
+}
+
+.fleet-register__head .fleet-tools {
+  align-items: flex-end;
+  min-width: 0;
+}
+
+.data-filter {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.data-filter select {
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--control);
+  border-radius: var(--radius);
+  color: var(--ink);
+  background: var(--surface);
+  font-size: 14px;
+  max-width: 100%;
+}
+
+.data-filter select:hover {
+  border-color: var(--action);
+}
+
+.registry-help {
+  padding: 0 var(--space-6) var(--space-2);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.registry-help summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding-block: var(--space-3);
+}
+
+.registry-help p {
+  max-width: 85ch;
+}
+
+.machine-link .attention-reason {
+  color: var(--warning);
+  white-space: normal;
+}
+
 .table-scroll {
   overflow-x: auto;
   scrollbar-color: var(--control) var(--surface-muted);
@@ -744,6 +795,14 @@ small {
 .table-scroll:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: -3px;
+}
+
+.fleet-register th:first-child {
+  min-width: 170px;
+}
+
+.table-scroll-hint {
+  display: none;
 }
 
 table {
@@ -921,25 +980,18 @@ td > .status {
 
 .overview-support {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-6);
   margin-top: var(--space-6);
 }
 
-.attention-panel,
 .production-summary {
   padding: var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
 }
 
-.attention-panel {
-  border-top: 3px solid var(--warning-strong);
-  background: var(--warning-paper);
-}
-
 .production-summary {
-  border-top: 3px solid var(--action);
   background: var(--surface);
 }
 
@@ -959,58 +1011,6 @@ td > .status {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
-}
-
-.attention-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  min-height: 58px;
-  gap: var(--space-3);
-  padding: var(--space-3) 0;
-  border: 0;
-  border-top: 1px solid var(--warning-subtle-line);
-  background: transparent;
-  color: var(--ink);
-  text-align: left;
-}
-
-.attention-row:first-of-type {
-  margin-top: var(--space-4);
-}
-
-.attention-row > span {
-  min-width: 0;
-}
-
-.attention-row b,
-.attention-row small {
-  display: block;
-}
-
-.attention-row b {
-  overflow-wrap: anywhere;
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.attention-row small {
-  margin-top: 2px;
-  color: var(--warning-text);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.attention-row:hover:not(:disabled) b {
-  text-decoration: underline;
-  text-underline-offset: 4px;
-}
-
-.attention-empty {
-  margin: var(--space-4) 0 0;
-  color: var(--muted);
-  font-size: 13px;
 }
 
 .production-values {
@@ -2106,6 +2106,14 @@ td > .status {
     padding-inline: var(--space-4);
   }
 
+  .table-scroll-hint {
+    display: block;
+    margin: 0;
+    padding: 0 var(--space-4) var(--space-3);
+    color: var(--muted);
+    font-size: 12px;
+  }
+
   .table-footer {
     align-items: flex-start;
     flex-direction: column;
@@ -2118,7 +2126,6 @@ td > .status {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .attention-panel,
   .production-summary,
   .instruction,
   .data-lead,
@@ -2219,7 +2226,7 @@ td > .status {
     display: none;
   }
 
-  .fleet-tools {
+  .fleet-register__head .fleet-tools {
     align-items: stretch;
     flex-direction: column;
   }

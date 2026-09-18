@@ -286,7 +286,7 @@ def make_reports(evidence):
 
 
 def source_files():
-    included_dirs = ("backend", "frontend/src", "frontend/public", "edge", "scripts", "tests", "research", "docs")
+    included_dirs = ("backend", "frontend/src", "frontend/public", "frontend/e2e", "edge", "scripts", "tests", "research", "docs")
     source_extensions = {".py", ".md", ".json", ".geojson", ".ts", ".tsx", ".css", ".svg", ".png", ".txt", ".ttf"}
     files = [ROOT / name for name in ("README.md", "requirements.txt", "requirements.lock", "pyproject.toml", "server.py", ".gitignore", ".env.example", ".hoplite/settings.json", ".hoplite/setup.sh", ".hoplite/run.sh", ".github/workflows/verify.yml", "frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/tsconfig.json", "frontend/tsconfig.node.json", "frontend/tsconfig.app.json", "frontend/vite.config.ts", "frontend/vitest.config.ts")]
     for directory in included_dirs:
@@ -298,7 +298,7 @@ def source_files():
                 and ".hoplite-write-" not in path.name
             ):
                 files.append(path)
-    files.extend(ROOT / name for name in ("DESIGN.md", ".gitattributes", "Dockerfile", ".dockerignore", "deployment/compose.yaml"))
+    files.extend(ROOT / name for name in ("DESIGN.md", "HANDOFF.md", "frontend/playwright.config.ts", ".gitattributes", "Dockerfile", ".dockerignore", "deployment/compose.yaml"))
     return [path for path in sorted(set(files)) if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(ROOT)]
 
 

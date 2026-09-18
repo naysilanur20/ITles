@@ -41,6 +41,7 @@ jobs:
           docker exec itles-ci python -c 'from pathlib import Path; assert Path("/data/persistence-probe").read_text() == "synthetic-ci-only"'
           curl -fsS http://127.0.0.1:18080/ | grep 'id="root"'
           curl -fsS http://127.0.0.1:18080/api/documents/itles_source.zip -o /tmp/itles_source.zip
+          docker exec itles-ci python -m pytest -q -p no:cacheprovider tests/test_deliverables.py
   synthetic-verification:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -60,6 +61,11 @@ jobs:
         run: bash .hoplite/setup.sh
       - name: Verify frontend components
         run: npm --prefix frontend test
+      - name: Install pinned Chromium for browser regressions
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Verify isolated browser flows
+        run: npm --prefix frontend run test:e2e
       - name: Verify API, queue, documents and app composition
         run: .venv/bin/python -m pytest -q
       - name: Replay 10,000 synthetic events twice

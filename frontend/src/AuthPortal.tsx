@@ -23,21 +23,78 @@ async function confirmedSession(expected: Session): Promise<Session> {
         401,
         "Сервер принял вход, но браузер не подтвердил сеанс. Откройте сайт в отдельной вкладке по HTTPS и повторите вход. Если проблема остаётся, сообщите администратору адрес страницы; не отключайте защиту cookies.",
         "session_not_retained",
+        error.requestId,
+        "/api/auth/me",
       );
     }
     throw error;
   }
 }
 
-export function AuthPortal({
-  onSuccess,
-  initialMessage = "",
-  demoAvailable,
-}: {
+type AuthPortalProps = {
   onSuccess: (session: Session) => void;
   initialMessage?: string;
   demoAvailable?: boolean;
-}) {
+};
+
+export function AuthPortal(props: AuthPortalProps) {
+  // Strict session cookies cannot be used in a cross-site preview frame.
+  if (window.self !== window.top) {
+    return (
+      <main className="entry-shell" id="main-content">
+        <header className="entry-header">
+          <span className="wordmark-button">ИТлес</span>
+          <span>Мониторинг харвестеров</span>
+        </header>
+        <section className="entry-intro">
+          <h1>Мониторинг харвестеров</h1>
+          <p>
+            Сейчас сайт открыт во встроенном окне. Для входа откройте его в
+            отдельной вкладке: во встроенном окне другого сайта браузер не
+            сохраняет защищённый сеанс ИТлес.
+          </p>
+        </section>
+        <section className="entry-path" aria-label="Открыть сайт для проверки">
+          <div>
+            <h2>Посмотреть учебный парк</h2>
+            <p>Ключ и регистрация для демо не нужны.</p>
+            <p>
+              В новой вкладке нажмите «Посмотреть демо». Там же доступны
+              создание своей компании и вход сотрудника.
+            </p>
+          </div>
+          <a
+            className="primary-button entry-standalone-link"
+            href={`${window.location.origin}${window.location.pathname}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Открыть ИТлес в новой вкладке
+          </a>
+        </section>
+        <p className="entry-standalone-url">
+          Если новая вкладка не открылась, скопируйте адрес в адресную строку
+          браузера:{" "}
+          <code>
+            {window.location.origin}
+            {window.location.pathname}
+          </code>
+        </p>
+        <p className="entry-footer">
+          Учебный парк содержит вымышленные машины и записи с фиксированными
+          датами. Реальная техника не подключена.
+        </p>
+      </main>
+    );
+  }
+  return <StandaloneAuthPortal {...props} />;
+}
+
+function StandaloneAuthPortal({
+  onSuccess,
+  initialMessage = "",
+  demoAvailable,
+}: AuthPortalProps) {
   const [mode, setMode] = useState<Mode>("start");
   const [account, setAccount] = useState("");
   const [login, setLogin] = useState("");
@@ -214,10 +271,7 @@ export function AuthPortal({
       ) : mode === "start" ? (
         <>
           <section className="entry-intro">
-            <h1>
-              Сообщения, координаты
-              <br className="desktop-break" /> и выработка вашего парка
-            </h1>
+            <h1>Мониторинг харвестеров</h1>
             <p>
               ИТлес собирает данные харвестеров в одном журнале. Можно проверить
               последнее сообщение, найти машину и сверить объём за выбранный
@@ -274,6 +328,7 @@ export function AuthPortal({
                   Вымышленные машины и данные с фиксированными датами. Демо
                   изолировано от компаний и не требует регистрации.
                 </p>
+                <p>Ключ для демо не нужен.</p>
                 {options?.demo_enabled === false && (
                   <p className="inline-warning">
                     Учебный парк отключён на этом сервере.
@@ -337,11 +392,20 @@ export function AuthPortal({
           )}
           {mode === "admin" && (
             <p>
-              Войдите в свою учётную запись администратора. Если доступ был
-              создан в прежней версии по общему паролю компании, сначала нужен
-              одноразовый код от владельца сервера после подтверждения ваших
-              прав. Старый общий пароль не даёт административных полномочий.
+              Войдите в свою учётную запись администратора. Для новой компании
+              выберите регистрацию на первом экране.
             </p>
+          )}
+          {mode === "admin" && (
+            <details className="technical-details">
+              <summary>Доступ из прежней версии</summary>
+              <p>
+                Если доступ был создан в прежней версии по общему паролю
+                компании, сначала нужен одноразовый код от владельца сервера
+                после подтверждения ваших прав. Старый общий пароль не даёт
+                административных полномочий.
+              </p>
+            </details>
           )}
           {mode === "login" && (
             <p>

@@ -419,7 +419,10 @@ function UserAccess({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [success, setSuccess] = useState("");
-  const [confirm, setConfirm] = useState<AccessUser | null>(null);
+  const [confirm, setConfirm] = useState<{
+    user: AccessUser;
+    action: "revoke" | "reissue";
+  } | null>(null);
   async function action(run: () => Promise<void>) {
     setBusy(true);
     setError(null);
@@ -448,6 +451,7 @@ function UserAccess({
         },
       );
       setIssued(result);
+      setConfirm(null);
       setLogin("");
     });
   }
@@ -497,16 +501,24 @@ function UserAccess({
                   ? "Администратор компании"
                   : userState[user.status]}
               </p>
+              {user.legacy_access && user.status !== "revoked" && (
+                <p className="muted">
+                  Прежний общий доступ. Выдайте сотрудникам индивидуальные
+                  логины, затем отзовите общий доступ.
+                </p>
+              )}
             </div>
-            {user.role === "user" && !user.legacy_access && (
+            {user.role === "user" && (
               <div className="company-actions">
-                <button
-                  className="secondary-button"
-                  disabled={busy}
-                  onClick={() => void issue(user)}
-                >
-                  Выдать новый код
-                </button>
+                {!user.legacy_access && (
+                  <button
+                    className="danger-button"
+                    disabled={busy}
+                    onClick={() => setConfirm({ user, action: "reissue" })}
+                  >
+                    Выдать новый код
+                  </button>
+                )}
                 {user.status !== "revoked" && (
                   <>
                     <button
@@ -529,7 +541,7 @@ function UserAccess({
                     <button
                       className="danger-button"
                       disabled={busy}
-                      onClick={() => setConfirm(user)}
+                      onClick={() => setConfirm({ user, action: "revoke" })}
                     >
                       Отозвать доступ
                     </button>
@@ -544,28 +556,44 @@ function UserAccess({
         <div
           className="confirmation-box"
           role="group"
-          aria-label="Подтверждение отзыва доступа"
+          aria-label={
+            confirm.action === "revoke"
+              ? "Подтверждение отзыва доступа"
+              : "Подтверждение замены кода"
+          }
         >
-          <p>
-            Отозвать доступ <strong>{confirm.login}</strong>? Все его сеансы и
-            код активации будут отменены. Данные компании сохранятся.
-          </p>
+          {confirm.action === "revoke" ? (
+            <p>
+              Отозвать доступ <strong>{confirm.user.login}</strong>? Все его
+              сеансы и код активации будут отменены. Данные компании сохранятся.
+            </p>
+          ) : (
+            <p>
+              Выдать новый код для <strong>{confirm.user.login}</strong>?
+              Прежний пароль, код активации и сеансы перестанут действовать.
+              Пользователю потребуется новый код и повторная активация.
+            </p>
+          )}
           <div className="company-actions">
             <button
               className="danger-button"
               disabled={busy}
-              onClick={() =>
-                void action(async () => {
-                  await request(
-                    `/api/admin/users/${encodeURIComponent(confirm.id)}`,
-                    { method: "DELETE" },
-                  );
-                  setConfirm(null);
-                  onChanged();
-                })
-              }
+              onClick={() => {
+                if (confirm.action === "reissue") void issue(confirm.user);
+                else
+                  void action(async () => {
+                    await request(
+                      `/api/admin/users/${encodeURIComponent(confirm.user.id)}`,
+                      { method: "DELETE" },
+                    );
+                    setConfirm(null);
+                    onChanged();
+                  });
+              }}
             >
-              Подтвердить отзыв
+              {confirm.action === "revoke"
+                ? "Подтвердить отзыв"
+                : "Подтвердить замену кода"}
             </button>
             <button
               className="secondary-button"
@@ -675,6 +703,8 @@ function MachineSource({
   const [token, setToken] = useState("");
   const [confirmRevoke, setConfirmRevoke] = useState(false);
   const [compared, setCompared] = useState(false);
+  const [factsCurrent, setFactsCurrent] = useState(false);
+  const sourceEdited = useRef(false);
   const title = useRef<HTMLHeadingElement>(null);
   const confirmation = useRef<HTMLParagraphElement>(null);
   const path = `/api/admin/machines/${encodeURIComponent(machineId)}`;
@@ -682,17 +712,21 @@ function MachineSource({
     const controller = new AbortController();
     setLoading(true);
     setError(null);
+    setCompared(false);
+    setFactsCurrent(false);
     request<SourceResponse>(`${path}/source`, { signal: controller.signal })
       .then((result) => {
         if (!controller.signal.aborted) {
           setData(result);
-          setCompared(false);
+          setFactsCurrent(true);
           if (result.onboarding) onProgress(result.onboarding);
-          setSource({
-            ...result.source,
-            model: result.source.model ?? result.machine.model,
-            computer: result.source.computer ?? result.machine.computer,
-          });
+          if (!sourceEdited.current) {
+            setSource({
+              ...result.source,
+              model: result.source.model ?? result.machine.model,
+              computer: result.source.computer ?? result.machine.computer,
+            });
+          }
         }
       })
       .catch((e) => {
@@ -712,6 +746,13 @@ function MachineSource({
   useEffect(() => {
     if (success) confirmation.current?.focus();
   }, [success]);
+
+  function editSource(changes: Partial<Source>) {
+    sourceEdited.current = true;
+    setSource((current) => ({ ...current, ...changes }));
+    setCompared(false);
+    setSuccess("");
+  }
 
   async function action(run: () => Promise<void>) {
     setBusy(true);
@@ -734,6 +775,8 @@ function MachineSource({
       });
       setData(result);
       setCompared(false);
+      setFactsCurrent(true);
+      sourceEdited.current = false;
       if (result.onboarding) onProgress(result.onboarding);
       setSource(result.source);
       setSuccess(
@@ -771,6 +814,12 @@ function MachineSource({
           <p>
             <strong>{connectionNames[data.connection.state]}</strong>
           </p>
+          {!factsCurrent && (
+            <p>
+              Не удалось обновить статус. Ниже показаны ранее загруженные
+              сведения. Повторите проверку поступления.
+            </p>
+          )}
           <dl className="connection-facts">
             <div>
               <dt>Последний принятый пакет</dt>
@@ -812,17 +861,13 @@ function MachineSource({
               <Field
                 label="Модель машины"
                 value={source.model ?? ""}
-                onChange={(e) =>
-                  setSource({ ...source, model: e.target.value })
-                }
+                onChange={(e) => editSource({ model: e.target.value })}
                 maxLength={120}
               />
               <Field
                 label="Бортовой компьютер"
                 value={source.computer ?? ""}
-                onChange={(e) =>
-                  setSource({ ...source, computer: e.target.value })
-                }
+                onChange={(e) => editSource({ computer: e.target.value })}
                 maxLength={120}
                 hint="Фактическая модель компьютера, не только марка харвестера."
               />
@@ -830,7 +875,7 @@ function MachineSource({
                 label="Версия бортового ПО"
                 value={source.software_version ?? ""}
                 onChange={(e) =>
-                  setSource({ ...source, software_version: e.target.value })
+                  editSource({ software_version: e.target.value })
                 }
                 maxLength={120}
               />
@@ -839,8 +884,7 @@ function MachineSource({
                 <select
                   value={source.source_kind}
                   onChange={(e) =>
-                    setSource({
-                      ...source,
+                    editSource({
                       source_kind: e.target.value as Source["source_kind"],
                     })
                   }
@@ -858,7 +902,7 @@ function MachineSource({
                 label="Экспорт, API или интерфейс"
                 value={source.export_description ?? ""}
                 onChange={(e) =>
-                  setSource({ ...source, export_description: e.target.value })
+                  editSource({ export_description: e.target.value })
                 }
                 maxLength={500}
                 hint="Что реально доступно, какая документация или эталонный файл есть. Не вводите пароли и ключи."
@@ -868,14 +912,19 @@ function MachineSource({
                   type="checkbox"
                   checked={source.permission_confirmed}
                   onChange={(e) =>
-                    setSource({
-                      ...source,
+                    editSource({
                       permission_confirmed: e.target.checked,
                     })
                   }
                 />
                 Доступ к указанному источнику разрешён владельцем техники
               </label>
+              {sourceEdited.current && (
+                <p role="status">
+                  Есть несохранённые изменения. Сохраните описание перед уходом
+                  со страницы.
+                </p>
+              )}
               <button className="primary-button" type="submit">
                 {busy ? "Сохраняем…" : "Сохранить описание источника"}
               </button>
@@ -977,9 +1026,9 @@ function MachineSource({
               <section className="company-section">
                 <h3>Токен устройства</h3>
                 <p>
-                  Активных токенов: {data.tokens.length}. Токен даёт только
-                  приём событий этой машины, не просмотр данных и не вход в
-                  компанию. Новый токен заменяет прежний.
+                  {!token && <>Активных токенов: {data.tokens.length}. </>}
+                  Токен даёт только приём событий этой машины, не просмотр
+                  данных и не вход в компанию. Новый токен заменяет прежний.
                 </p>
                 {token ? (
                   <SecretNotice
@@ -998,7 +1047,9 @@ function MachineSource({
                     </p>
                   </SecretNotice>
                 ) : (
-                  data.source.source_kind === "normalized_json" && (
+                  data.source.source_kind === "normalized_json" &&
+                  data.source.permission_confirmed &&
+                  !sourceEdited.current && (
                     <form
                       className="account-form"
                       aria-busy={busy}
@@ -1037,6 +1088,15 @@ function MachineSource({
                     </form>
                   )
                 )}
+                {data.source.source_kind === "normalized_json" &&
+                  !token &&
+                  (!data.source.permission_confirmed ||
+                    sourceEdited.current) && (
+                    <p>
+                      Для выдачи токена подтвердите разрешение владельца техники
+                      и сохраните описание источника.
+                    </p>
+                  )}
                 {!!data.tokens.length && !token && (
                   <div className="company-actions">
                     <button
@@ -1121,6 +1181,7 @@ function MachineSource({
                     <input
                       type="checkbox"
                       checked={compared}
+                      disabled={busy || !factsCurrent || sourceEdited.current}
                       onChange={(e) => setCompared(e.target.checked)}
                     />
                     Я сравнил время, единицы и значения с исходным файлом. Это
@@ -1128,7 +1189,9 @@ function MachineSource({
                   </label>
                   <button
                     className="secondary-button"
-                    disabled={busy || !compared}
+                    disabled={
+                      busy || !compared || !factsCurrent || sourceEdited.current
+                    }
                     onClick={() =>
                       void action(async () => {
                         const result = await request<SourceResponse>(
